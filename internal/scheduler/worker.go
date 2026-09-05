@@ -54,23 +54,25 @@ const (
 )
 
 type inFlightTask struct {
-	exec       model.Execution
-	schedule   *model.Schedule
-	reader     Reader
-	kind       inFlightTaskKind
-	proposer   Proposer
-	httpClient *http.Client
-	logger     *slog.Logger
+	exec               model.Execution
+	schedule           *model.Schedule
+	reader             Reader
+	kind               inFlightTaskKind
+	proposer           Proposer
+	httpClient         *http.Client
+	logger             *slog.Logger
+	defaultCallTimeout time.Duration
 }
 
 type freshFireTask struct {
-	schedule   *model.Schedule
-	exec       model.Execution
-	nodeID     string
-	reader     Reader
-	proposer   Proposer
-	httpClient *http.Client
-	logger     *slog.Logger
+	schedule           *model.Schedule
+	exec               model.Execution
+	nodeID             string
+	reader             Reader
+	proposer           Proposer
+	httpClient         *http.Client
+	logger             *slog.Logger
+	defaultCallTimeout time.Duration
 }
 
 func asCommandError(result any) *command.CommandError {
@@ -122,27 +124,29 @@ func classifyOne(exec model.Execution, attempts []*model.Attempt, now time.Time)
 }
 
 type Worker struct {
-	reader       Reader
-	proposer     Proposer
-	nodeID       string
-	logger       *slog.Logger
-	taskCh       chan Task
-	wg           sync.WaitGroup
-	httpClient   *http.Client
-	tickInterval time.Duration
-	poolSize     int
+	reader             Reader
+	proposer           Proposer
+	nodeID             string
+	logger             *slog.Logger
+	taskCh             chan Task
+	wg                 sync.WaitGroup
+	httpClient         *http.Client
+	tickInterval       time.Duration
+	poolSize           int
+	defaultCallTimeout time.Duration
 }
 
 func NewWorker(reader Reader, proposer Proposer, logger *slog.Logger) *Worker {
 	return &Worker{
-		reader:       reader,
-		proposer:     proposer,
-		nodeID:       proposer.ID(),
-		logger:       logger,
-		taskCh:       make(chan Task, 256),
-		httpClient:   &http.Client{},
-		tickInterval: defaultTickInterval,
-		poolSize:     defaultPoolSize,
+		reader:             reader,
+		proposer:           proposer,
+		nodeID:             proposer.ID(),
+		logger:             logger,
+		taskCh:             make(chan Task, 256),
+		httpClient:         &http.Client{},
+		tickInterval:       defaultTickInterval,
+		poolSize:           defaultPoolSize,
+		defaultCallTimeout: model.DefaultCallTimeout,
 	}
 }
 
@@ -209,9 +213,9 @@ func (t *freshFireTask) run(ctx context.Context) error {
 	attemptID := ulid.Make().String()
 	startedAt := time.Now()
 	body := t.schedule.Payload
-	callTimeout := t.schedule.CallTimeout
-	if callTimeout <= 0 {
-		callTimeout = model.DefaultCallTimeout
+	callTimeout := t.defaultCallTimeout
+	if t.schedule.CallTimeout != nil {
+		callTimeout = *t.schedule.CallTimeout
 	}
 	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
@@ -219,10 +223,10 @@ func (t *freshFireTask) run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("build request for execution %s: %w", execID, err)
 	}
-	req.Header.Set("Content-Type", "application/json")
 	for k, v := range t.schedule.Headers {
 		req.Header.Set(k, v)
 	}
+	req.Header.Set("Content-Type", "application/json")
 	bodyHash := sha256.Sum256(body)
 	resp, doErr := t.httpClient.Do(req)
 	if errors.Is(doErr, context.Canceled) {
@@ -414,9 +418,9 @@ func (t *inFlightTask) runRetry(ctx context.Context, execID string) error {
 	attemptID := ulid.Make().String()
 	startedAt := time.Now()
 	body := t.schedule.Payload
-	callTimeout := t.schedule.CallTimeout
-	if callTimeout <= 0 {
-		callTimeout = model.DefaultCallTimeout
+	callTimeout := t.defaultCallTimeout
+	if t.schedule.CallTimeout != nil {
+		callTimeout = *t.schedule.CallTimeout
 	}
 	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
@@ -424,10 +428,10 @@ func (t *inFlightTask) runRetry(ctx context.Context, execID string) error {
 	if err != nil {
 		return fmt.Errorf("build request for execution %s: %w", execID, err)
 	}
-	req.Header.Set("Content-Type", "application/json")
 	for k, v := range t.schedule.Headers {
 		req.Header.Set(k, v)
 	}
+	req.Header.Set("Content-Type", "application/json")
 	bodyHash := sha256.Sum256(body)
 	resp, doErr := t.httpClient.Do(req)
 	if errors.Is(doErr, context.Canceled) {
@@ -669,13 +673,14 @@ func (w *Worker) runTick(ctx context.Context) error {
 				continue
 			}
 			dispatch := &freshFireTask{
-				schedule:   schedule,
-				exec:       *claimedExec,
-				nodeID:     w.nodeID,
-				reader:     w.reader,
-				proposer:   w.proposer,
-				httpClient: w.httpClient,
-				logger:     w.logger,
+				schedule:           schedule,
+				exec:               *claimedExec,
+				nodeID:             w.nodeID,
+				reader:             w.reader,
+				proposer:           w.proposer,
+				httpClient:         w.httpClient,
+				logger:             w.logger,
+				defaultCallTimeout: w.defaultCallTimeout,
 			}
 			w.wg.Add(1)
 			w.taskCh <- dispatch
@@ -710,13 +715,14 @@ func (w *Worker) runTick(ctx context.Context) error {
 					continue // skip this Execution; try again next tick
 				}
 				executeRetry := &inFlightTask{
-					exec:       *exec,
-					schedule:   schedule,
-					reader:     w.reader,
-					kind:       KindRetry,
-					proposer:   w.proposer,
-					httpClient: w.httpClient,
-					logger:     w.logger,
+					exec:               *exec,
+					schedule:           schedule,
+					reader:             w.reader,
+					kind:               KindRetry,
+					proposer:           w.proposer,
+					httpClient:         w.httpClient,
+					logger:             w.logger,
+					defaultCallTimeout: w.defaultCallTimeout,
 				}
 				w.wg.Add(1)
 				w.taskCh <- executeRetry

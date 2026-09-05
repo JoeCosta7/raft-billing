@@ -5,6 +5,7 @@ import (
 	"errors"
 	"raft-biling/internal/model"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -44,7 +45,7 @@ func newTestCreateScheduleCommand(overrides ...func(c *CreateScheduleCommand)) *
 			Multiplier: 2.0,
 			Max:        1 * time.Hour,
 		},
-		CallTimeout:   5 * time.Second,
+		CallTimeout:   durationPtr(5 * time.Second),
 		CatchUpPolicy: model.CatchUpPolicyAll,
 	}
 	for _, o := range overrides {
@@ -166,28 +167,206 @@ func TestApplyCreateSchedule_RecurringHappyPath(t *testing.T) {
 	}
 }
 
-func TestApplyCreateSchedule_DefaultsCallTimeout(t *testing.T) {
+func TestApplyCreateSchedule_RejectsReservedHeaderContentType(t *testing.T) {
 	tx := newFakeTx()
-	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) { c.CallTimeout = 0 })
+	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) {
+		c.Headers = map[string]string{"Content-Type": "text/plain"}
+	})
+	schedule, err := ApplyCreateSchedule(tx, *cmd, testTime)
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindValidation {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+	}
+	if cmdErr.Field != "headers" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "headers")
+	}
+}
+
+func TestApplyCreateSchedule_RejectsReservedHeaderCaseVariant(t *testing.T) {
+	tx := newFakeTx()
+	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) {
+		c.Headers = map[string]string{"content-type": "text/plain"}
+	})
+	schedule, err := ApplyCreateSchedule(tx, *cmd, testTime)
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindValidation {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+	}
+	if !strings.Contains(cmdErr.Message, "Content-Type") {
+		t.Errorf("Message: got %q, want it to name the canonical form %q", cmdErr.Message, "Content-Type")
+	}
+}
+
+func TestApplyCreateSchedule_RejectsReservedSchedulerHeaders(t *testing.T) {
+	for _, key := range []string{"X-Scheduler-Idempotency-Key", "X-Scheduler-Attempt-Id"} {
+		t.Run(key, func(t *testing.T) {
+			tx := newFakeTx()
+			cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) {
+				c.Headers = map[string]string{key: "operator-supplied"}
+			})
+			_, err := ApplyCreateSchedule(tx, *cmd, testTime)
+			var cmdErr *CommandError
+			if !errors.As(err, &cmdErr) {
+				t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+			}
+			if cmdErr.Kind != KindValidation {
+				t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+			}
+			if cmdErr.Field != "headers" {
+				t.Errorf("Field: got %q, want %q", cmdErr.Field, "headers")
+			}
+		})
+	}
+}
+
+func TestApplyCreateSchedule_RejectsReservedHeaders_Aggregated(t *testing.T) {
+	tx := newFakeTx()
+	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) {
+		c.Headers = map[string]string{
+			"Content-Type":           "text/plain",
+			"X-Scheduler-Attempt-Id": "operator-supplied",
+			"X-Custom-Header":        "fine",
+		}
+	})
+	_, err := ApplyCreateSchedule(tx, *cmd, testTime)
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if !strings.Contains(cmdErr.Message, "Content-Type") || !strings.Contains(cmdErr.Message, "X-Scheduler-Attempt-Id") {
+		t.Errorf("Message: got %q, want it to name both offending keys", cmdErr.Message)
+	}
+	if strings.Contains(cmdErr.Message, "X-Custom-Header") {
+		t.Errorf("Message: got %q, should not mention the non-reserved key", cmdErr.Message)
+	}
+}
+
+func TestApplyCreateSchedule_NonReservedHeaderCasingPreserved(t *testing.T) {
+	tx := newFakeTx()
+	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) {
+		c.Headers = map[string]string{"x-custom-HEADER": "value"}
+	})
 	schedule, err := ApplyCreateSchedule(tx, *cmd, testTime)
 	if err != nil {
 		t.Fatalf("ApplyCreateSchedule: unexpected error: %v", err)
 	}
-	if schedule.CallTimeout != model.DefaultCallTimeout {
-		t.Errorf("CallTimeout: got %v, want %v", schedule.CallTimeout, model.DefaultCallTimeout)
+	if v, ok := schedule.Headers["x-custom-HEADER"]; !ok || v != "value" {
+		t.Errorf("Headers: got %+v, want original casing %q preserved", schedule.Headers, "x-custom-HEADER")
+	}
+}
+
+func TestApplyUpdateSchedule_RejectsReservedHeader(t *testing.T) {
+	tx := newFakeTx()
+	preSeed := newTestSchedule()
+	seedSchedule(tx, preSeed)
+	cmd := newTestUpdateScheduleCommand(func(c *UpdateScheduleCommand) {
+		h := map[string]string{"Content-Type": "text/plain"}
+		c.Headers = &h
+	})
+	schedule, err := ApplyUpdateSchedule(tx, *cmd, testTime)
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindValidation {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+	}
+	if cmdErr.Field != "headers" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "headers")
+	}
+}
+
+func TestApplyUpdateSchedule_NilHeadersUnaffectedByReservedCheck(t *testing.T) {
+	tx := newFakeTx()
+	preSeed := newTestSchedule()
+	seedSchedule(tx, preSeed)
+	cmd := newTestUpdateScheduleCommand() // Headers left nil = don't touch
+	schedule, err := ApplyUpdateSchedule(tx, *cmd, testTime)
+	if err != nil {
+		t.Fatalf("ApplyUpdateSchedule: unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(schedule.Headers, preSeed.Headers) {
+		t.Errorf("Headers: got %+v, want unchanged %+v", schedule.Headers, preSeed.Headers)
+	}
+}
+
+func TestApplyCreateSchedule_UnsetCallTimeoutStaysNil(t *testing.T) {
+	tx := newFakeTx()
+	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) { c.CallTimeout = nil })
+	schedule, err := ApplyCreateSchedule(tx, *cmd, testTime)
+	if err != nil {
+		t.Fatalf("ApplyCreateSchedule: unexpected error: %v", err)
+	}
+	if schedule.CallTimeout != nil {
+		t.Errorf("CallTimeout: got %v, want nil (should track the live default, not bake it in)", *schedule.CallTimeout)
 	}
 }
 
 func TestApplyCreateSchedule_PreservesExplicitCallTimeout(t *testing.T) {
 	tx := newFakeTx()
 	want := 10 * time.Second
-	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) { c.CallTimeout = want })
+	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) { c.CallTimeout = &want })
 	schedule, err := ApplyCreateSchedule(tx, *cmd, testTime)
 	if err != nil {
 		t.Fatalf("ApplyCreateSchedule: unexpected error: %v", err)
 	}
-	if schedule.CallTimeout != want {
+	if schedule.CallTimeout == nil || *schedule.CallTimeout != want {
 		t.Errorf("CallTimeout: got %v, want %v", schedule.CallTimeout, want)
+	}
+}
+
+func TestApplyCreateSchedule_RejectsCallTimeoutBelowMin(t *testing.T) {
+	tx := newFakeTx()
+	tooSmall := model.MinCallTimeout - time.Millisecond
+	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) { c.CallTimeout = &tooSmall })
+	schedule, err := ApplyCreateSchedule(tx, *cmd, testTime)
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindValidation {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+	}
+	if cmdErr.Field != "call_timeout" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "call_timeout")
+	}
+}
+
+func TestApplyCreateSchedule_RejectsCallTimeoutAboveMax(t *testing.T) {
+	tx := newFakeTx()
+	tooBig := model.MaxCallTimeout + time.Millisecond
+	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) { c.CallTimeout = &tooBig })
+	schedule, err := ApplyCreateSchedule(tx, *cmd, testTime)
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindValidation {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+	}
+	if cmdErr.Field != "call_timeout" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "call_timeout")
 	}
 }
 
@@ -328,7 +507,7 @@ func TestApplyUpdateSchedule_HappyPathOneField(t *testing.T) {
 	if schedule.MaxAttempts != preSeed.MaxAttempts {
 		t.Errorf("MaxAttempts: got %d, want %d", schedule.MaxAttempts, preSeed.MaxAttempts)
 	}
-	if schedule.CallTimeout != preSeed.CallTimeout {
+	if !reflect.DeepEqual(schedule.CallTimeout, preSeed.CallTimeout) {
 		t.Errorf("CallTimeout: got %v, want %v", schedule.CallTimeout, preSeed.CallTimeout)
 	}
 	if !schedule.UpdatedAt.Equal(proposedAt) {
@@ -359,8 +538,68 @@ func TestApplyUpdateSchedule_UpdatesCallTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyUpdateSchedule: unexpected error: %v", err)
 	}
-	if schedule.CallTimeout != want {
+	if schedule.CallTimeout == nil || *schedule.CallTimeout != want {
 		t.Errorf("CallTimeout: got %v, want %v", schedule.CallTimeout, want)
+	}
+}
+
+func TestApplyUpdateSchedule_ResetsCallTimeoutToNil(t *testing.T) {
+	tx := newFakeTx()
+	preSeed := newTestSchedule() // has a concrete, non-nil CallTimeout
+	seedSchedule(tx, preSeed)
+	zero := time.Duration(0)
+	cmd := newTestUpdateScheduleCommand(func(c *UpdateScheduleCommand) { c.CallTimeout = &zero })
+	proposedAt := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	schedule, err := ApplyUpdateSchedule(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("ApplyUpdateSchedule: unexpected error: %v", err)
+	}
+	if schedule.CallTimeout != nil {
+		t.Errorf("CallTimeout: got %v, want nil — an explicit 0 must reset to tracking the live default", *schedule.CallTimeout)
+	}
+}
+
+func TestApplyUpdateSchedule_RejectsCallTimeoutBelowMin(t *testing.T) {
+	tx := newFakeTx()
+	preSeed := newTestSchedule()
+	seedSchedule(tx, preSeed)
+	tooSmall := model.MinCallTimeout - time.Millisecond
+	cmd := newTestUpdateScheduleCommand(func(c *UpdateScheduleCommand) { c.CallTimeout = &tooSmall })
+	schedule, err := ApplyUpdateSchedule(tx, *cmd, testTime)
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindValidation {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+	}
+	if cmdErr.Field != "call_timeout" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "call_timeout")
+	}
+}
+
+func TestApplyUpdateSchedule_RejectsCallTimeoutAboveMax(t *testing.T) {
+	tx := newFakeTx()
+	preSeed := newTestSchedule()
+	seedSchedule(tx, preSeed)
+	tooBig := model.MaxCallTimeout + time.Millisecond
+	cmd := newTestUpdateScheduleCommand(func(c *UpdateScheduleCommand) { c.CallTimeout = &tooBig })
+	schedule, err := ApplyUpdateSchedule(tx, *cmd, testTime)
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindValidation {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+	}
+	if cmdErr.Field != "call_timeout" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "call_timeout")
 	}
 }
 
@@ -392,7 +631,7 @@ func TestApplyUpdateSchedule_HappyPathNoFields(t *testing.T) {
 	if schedule.MaxAttempts != preSeed.MaxAttempts {
 		t.Errorf("MaxAttempts: got %d, want %d", schedule.MaxAttempts, preSeed.MaxAttempts)
 	}
-	if schedule.CallTimeout != preSeed.CallTimeout {
+	if !reflect.DeepEqual(schedule.CallTimeout, preSeed.CallTimeout) {
 		t.Errorf("CallTimeout: got %v, want %v", schedule.CallTimeout, preSeed.CallTimeout)
 	}
 	if !schedule.UpdatedAt.Equal(proposedAt) {

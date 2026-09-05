@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"math"
+	"net/textproto"
 	"time"
 )
 
@@ -10,7 +11,20 @@ type ScheduleType string
 
 var CurrentScheduleSchemaVersion = 1
 
+// DefaultCallTimeout is used for a dispatch whenever Schedule.CallTimeout is nil
+
 const DefaultCallTimeout = 30 * time.Second
+
+const (
+	MinCallTimeout = 1 * time.Second
+	MaxCallTimeout = 5 * time.Minute
+)
+
+var ReservedHeaderKeys = map[string]struct{}{
+	textproto.CanonicalMIMEHeaderKey("Content-Type"):                {},
+	textproto.CanonicalMIMEHeaderKey("X-Scheduler-Idempotency-Key"): {},
+	textproto.CanonicalMIMEHeaderKey("X-Scheduler-Attempt-Id"):      {},
+}
 
 const (
 	ScheduleTypeOnce      ScheduleType = "once"
@@ -96,7 +110,7 @@ type Schedule struct {
 	Timezone      string            `json:"timezone"`
 	MaxAttempts   int               `json:"max_attempts"`
 	RetryBackoff  RetryBackoff      `json:"retry_backoff"`
-	CallTimeout   time.Duration     `json:"call_timeout"`
+	CallTimeout   *time.Duration    `json:"call_timeout,omitempty"`
 	CatchUpPolicy CatchUpPolicy     `json:"catch_up_policy"`
 	Status        ScheduleStatus    `json:"status"`
 	NextRunAt     *time.Time        `json:"next_run_at"`

@@ -787,11 +787,12 @@ func TestFreshFireTask_Run_DoErrCanceled_SkipsProposal(t *testing.T) {
 			ID:         execID,
 			ScheduleID: scheduleID,
 		},
-		nodeID:     nodeID,
-		reader:     &boltReader{store: proposer.store},
-		proposer:   proposer,
-		httpClient: http.DefaultClient,
-		logger:     slog.New(slog.DiscardHandler),
+		nodeID:             nodeID,
+		reader:             &boltReader{store: proposer.store},
+		proposer:           proposer,
+		httpClient:         http.DefaultClient,
+		logger:             slog.New(slog.DiscardHandler),
+		defaultCallTimeout: model.DefaultCallTimeout,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -824,11 +825,12 @@ func TestInFlightTask_RunRetry_DoErrCanceled_SkipsProposal(t *testing.T) {
 			ScheduleID:   scheduleID,
 			AttemptCount: 1,
 		},
-		kind:       KindRetry,
-		reader:     &boltReader{store: proposer.store},
-		proposer:   proposer,
-		httpClient: http.DefaultClient,
-		logger:     slog.New(slog.DiscardHandler),
+		kind:               KindRetry,
+		reader:             &boltReader{store: proposer.store},
+		proposer:           proposer,
+		httpClient:         http.DefaultClient,
+		logger:             slog.New(slog.DiscardHandler),
+		defaultCallTimeout: model.DefaultCallTimeout,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -842,6 +844,8 @@ func TestInFlightTask_RunRetry_DoErrCanceled_SkipsProposal(t *testing.T) {
 		t.Errorf("calls: got %d, want 0 — canceled dispatch must not propose anything", len(proposer.calls))
 	}
 }
+
+func durationPtr(d time.Duration) *time.Duration { return &d }
 
 func TestFreshFireTask_Run_CallTimeoutFires_RecordsRetry(t *testing.T) {
 	const (
@@ -862,14 +866,23 @@ func TestFreshFireTask_Run_CallTimeoutFires_RecordsRetry(t *testing.T) {
 		if err := tx.PutTenant(&model.Tenant{ID: tenantID}); err != nil {
 			return err
 		}
-		return tx.PutSchedule(&model.Schedule{
+		if err := tx.PutSchedule(&model.Schedule{
 			TenantID:    tenantID,
 			ID:          scheduleID,
 			Status:      model.ScheduleStatusActive,
 			CallbackURL: server.URL,
 			Payload:     []byte("{}"),
 			MaxAttempts: 3,
-			CallTimeout: 10 * time.Millisecond,
+			CallTimeout: durationPtr(10 * time.Millisecond),
+		}); err != nil {
+			return err
+		}
+		return tx.PutExecution(&model.Execution{
+			TenantID:    tenantID,
+			ID:          execID,
+			ScheduleID:  scheduleID,
+			Status:      model.ExecutionStatusInFlight,
+			OwnerNodeID: nodeID,
 		})
 	})
 	if err != nil {
@@ -882,11 +895,12 @@ func TestFreshFireTask_Run_CallTimeoutFires_RecordsRetry(t *testing.T) {
 			ID:         execID,
 			ScheduleID: scheduleID,
 		},
-		nodeID:     nodeID,
-		reader:     &boltReader{store: proposer.store},
-		proposer:   proposer,
-		httpClient: &http.Client{},
-		logger:     slog.New(slog.DiscardHandler),
+		nodeID:             nodeID,
+		reader:             &boltReader{store: proposer.store},
+		proposer:           proposer,
+		httpClient:         &http.Client{},
+		logger:             slog.New(slog.DiscardHandler),
+		defaultCallTimeout: model.DefaultCallTimeout,
 	}
 
 	if err := task.run(context.Background()); err != nil {
@@ -905,7 +919,7 @@ func TestFreshFireTask_Run_CallTimeoutFires_RecordsRetry(t *testing.T) {
 	}
 }
 
-func TestFreshFireTask_Run_ZeroCallTimeout_FallsBackToDefault(t *testing.T) {
+func TestFreshFireTask_Run_NilCallTimeout_UsesDefault(t *testing.T) {
 	const (
 		tenantID   = "tenant-1"
 		scheduleID = "sched-1"
@@ -923,15 +937,25 @@ func TestFreshFireTask_Run_ZeroCallTimeout_FallsBackToDefault(t *testing.T) {
 		if err := tx.PutTenant(&model.Tenant{ID: tenantID}); err != nil {
 			return err
 		}
-		return tx.PutSchedule(&model.Schedule{
+		if err := tx.PutSchedule(&model.Schedule{
 			TenantID:    tenantID,
 			ID:          scheduleID,
 			Status:      model.ScheduleStatusActive,
 			CallbackURL: server.URL,
 			Payload:     []byte("{}"),
 			MaxAttempts: 3,
-			// CallTimeout intentionally left zero — simulates a schedule persisted
-			// before this field existed.
+			// CallTimeout intentionally left nil — tracks the current system
+			// default (also covers a schedule persisted before this field existed,
+			// which decodes to nil the same way).
+		}); err != nil {
+			return err
+		}
+		return tx.PutExecution(&model.Execution{
+			TenantID:    tenantID,
+			ID:          execID,
+			ScheduleID:  scheduleID,
+			Status:      model.ExecutionStatusInFlight,
+			OwnerNodeID: nodeID,
 		})
 	})
 	if err != nil {
@@ -944,11 +968,12 @@ func TestFreshFireTask_Run_ZeroCallTimeout_FallsBackToDefault(t *testing.T) {
 			ID:         execID,
 			ScheduleID: scheduleID,
 		},
-		nodeID:     nodeID,
-		reader:     &boltReader{store: proposer.store},
-		proposer:   proposer,
-		httpClient: &http.Client{},
-		logger:     slog.New(slog.DiscardHandler),
+		nodeID:             nodeID,
+		reader:             &boltReader{store: proposer.store},
+		proposer:           proposer,
+		httpClient:         &http.Client{},
+		logger:             slog.New(slog.DiscardHandler),
+		defaultCallTimeout: model.DefaultCallTimeout,
 	}
 
 	if err := task.run(context.Background()); err != nil {
@@ -963,6 +988,73 @@ func TestFreshFireTask_Run_ZeroCallTimeout_FallsBackToDefault(t *testing.T) {
 		t.Fatalf("calls[0].cmd: got %T, want command.RecordAttemptCommand", proposer.calls[0].cmd)
 	}
 	if recordCmd.Outcome != model.OutcomeSuccess {
-		t.Errorf("Outcome: got %q, want %q — a zero CallTimeout must fall back to the default, not fail instantly", recordCmd.Outcome, model.OutcomeSuccess)
+		t.Errorf("Outcome: got %q, want %q — a nil CallTimeout must resolve to the default, not fail instantly", recordCmd.Outcome, model.OutcomeSuccess)
+	}
+}
+
+func TestFreshFireTask_Run_SchedulerContentTypeWinsOverOperatorHeader(t *testing.T) {
+	const (
+		tenantID   = "tenant-1"
+		scheduleID = "sched-1"
+		execID     = "exec-1"
+		nodeID     = "test-node"
+	)
+
+	var gotContentType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	proposer := newApplyingProposer(t, nodeID)
+	err := proposer.store.Update(func(tx storage.Tx) error {
+		if err := tx.PutTenant(&model.Tenant{ID: tenantID}); err != nil {
+			return err
+		}
+
+		if err := tx.PutSchedule(&model.Schedule{
+			TenantID:    tenantID,
+			ID:          scheduleID,
+			Status:      model.ScheduleStatusActive,
+			CallbackURL: server.URL,
+			Payload:     []byte("{}"),
+			MaxAttempts: 3,
+			Headers:     map[string]string{"Content-Type": "text/plain"},
+		}); err != nil {
+			return err
+		}
+		return tx.PutExecution(&model.Execution{
+			TenantID:    tenantID,
+			ID:          execID,
+			ScheduleID:  scheduleID,
+			Status:      model.ExecutionStatusInFlight,
+			OwnerNodeID: nodeID,
+		})
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	task := &freshFireTask{
+		exec: model.Execution{
+			TenantID:   tenantID,
+			ID:         execID,
+			ScheduleID: scheduleID,
+		},
+		nodeID:             nodeID,
+		reader:             &boltReader{store: proposer.store},
+		proposer:           proposer,
+		httpClient:         &http.Client{},
+		logger:             slog.New(slog.DiscardHandler),
+		defaultCallTimeout: model.DefaultCallTimeout,
+	}
+
+	if err := task.run(context.Background()); err != nil {
+		t.Fatalf("run: unexpected error: %v", err)
+	}
+
+	if gotContentType != "application/json" {
+		t.Errorf("Content-Type on the wire: got %q, want %q — scheduler value must win over the operator-supplied one", gotContentType, "application/json")
 	}
 }

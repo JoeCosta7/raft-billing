@@ -11,6 +11,8 @@ import (
 
 var testTime = time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 
+func durationPtr(d time.Duration) *time.Duration { return &d }
+
 const (
 	testTenantID    = "default"
 	testScheduleID  = "sched_test_01"
@@ -67,7 +69,7 @@ func newTestSchedule(overrides ...func(*model.Schedule)) *model.Schedule {
 			Multiplier: 2.0,
 			Max:        1 * time.Hour,
 		},
-		CallTimeout:   5 * time.Second,
+		CallTimeout:   durationPtr(5 * time.Second),
 		CatchUpPolicy: model.CatchUpPolicyAll,
 		Status:        model.ScheduleStatusActive,
 		NextRunAt:     &testTime,
