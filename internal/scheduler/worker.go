@@ -281,6 +281,17 @@ func (t *freshFireTask) run(ctx context.Context) error {
 		return fmt.Errorf("propose record attempt for execution %s: %w", execID, err)
 	}
 	if cmdErr := asCommandError(result); cmdErr != nil {
+		if cmdErr.Kind == command.KindConflict {
+			switch cmdErr.Field {
+			case "owner_node_id":
+				t.logger.Info("execution reassigned to another node before attempt could be recorded",
+					"execution", execID)
+			default: // "status" — execution already left in-flight (finalized elsewhere)
+				t.logger.Info("execution already finalized before attempt could be recorded",
+					"execution", execID)
+			}
+			return nil
+		}
 		return fmt.Errorf("record attempt rejected for execution %s: %w", execID, cmdErr)
 	}
 	if err := ctx.Err(); err != nil {
@@ -303,6 +314,10 @@ func (t *freshFireTask) run(ctx context.Context) error {
 			return fmt.Errorf("propose complete for execution %s: %w", execID, err)
 		}
 		if cmdErr := asCommandError(result); cmdErr != nil {
+			if cmdErr.Kind == command.KindConflict {
+				t.logger.Info("execution already finalized elsewhere", "execution", execID)
+				return nil
+			}
 			return fmt.Errorf("complete execution rejected for execution %s: %w", execID, cmdErr)
 		}
 	}
@@ -435,10 +450,6 @@ func (t *inFlightTask) runRetry(ctx context.Context, execID string) error {
 	bodyHash := sha256.Sum256(body)
 	resp, doErr := t.httpClient.Do(req)
 	if errors.Is(doErr, context.Canceled) {
-		// workerCtx was canceled mid-dispatch (shutdown or explicit task cancellation).
-		// No attempt outcome to record — DeadlineExceeded is intentionally NOT caught
-		// here: that means CallTimeout fired on a slow receiver, which is a real
-		// attempt outcome that must still be classified, recorded, and retried.
 		return ctx.Err()
 	}
 	completedAt := time.Now()
@@ -487,6 +498,17 @@ func (t *inFlightTask) runRetry(ctx context.Context, execID string) error {
 		return fmt.Errorf("propose record attempt for execution %s: %w", execID, err)
 	}
 	if cmdErr := asCommandError(result); cmdErr != nil {
+		if cmdErr.Kind == command.KindConflict {
+			switch cmdErr.Field {
+			case "owner_node_id":
+				t.logger.Info("execution reassigned to another node before attempt could be recorded",
+					"execution", execID)
+			default: // "status" — execution already left in-flight (finalized elsewhere)
+				t.logger.Info("execution already finalized before attempt could be recorded",
+					"execution", execID)
+			}
+			return nil
+		}
 		return fmt.Errorf("record attempt rejected for execution %s: %w", execID, cmdErr)
 	}
 	if err := ctx.Err(); err != nil {
@@ -509,6 +531,10 @@ func (t *inFlightTask) runRetry(ctx context.Context, execID string) error {
 			return fmt.Errorf("propose complete for execution %s: %w", execID, err)
 		}
 		if cmdErr := asCommandError(result); cmdErr != nil {
+			if cmdErr.Kind == command.KindConflict {
+				t.logger.Info("execution already finalized elsewhere", "execution", execID)
+				return nil
+			}
 			return fmt.Errorf("complete execution rejected for execution %s: %w", execID, cmdErr)
 		}
 	}
@@ -565,14 +591,32 @@ func (w *Worker) adoptOrComplete(ctx context.Context, tenant model.Tenant, exec 
 	}
 	switch bucket {
 	case BucketNoAttempts, BucketRetryElapsed, BucketRetryPending:
+		if exec.OwnerNodeID == w.nodeID {
+			// Already ours — an adopt proposal here would be rejected as invalid
+			// (new_owner == current_owner), not a conflict. Nothing to do.
+			return nil
+		}
 		cmd := command.AdoptExecutionCommand{
 			TenantID:      tenant.ID,
 			ExecutionID:   exec.ID,
 			PreviousOwner: exec.OwnerNodeID,
 			NewOwner:      w.nodeID,
 		}
-		if _, err := w.proposer.Propose("adopt_execution", cmd, proposeTimeout); err != nil {
+		result, err := w.proposer.Propose("adopt_execution", cmd, proposeTimeout)
+		if err != nil {
 			return fmt.Errorf("propose adopt for execution %s: %w", exec.ID, err)
+		}
+		if cmdErr := asCommandError(result); cmdErr != nil {
+			if cmdErr.Kind == command.KindConflict {
+				switch cmdErr.Field {
+				case "owner_node_id":
+					w.logger.Info("execution already adopted by another node", "execution", exec.ID)
+				default: // "status" — ApplyAdoptExecution rejects here when the execution is no longer in-flight
+					w.logger.Info("execution already completed elsewhere", "execution", exec.ID)
+				}
+				return nil
+			}
+			return fmt.Errorf("adopt execution rejected for execution %s: %w", exec.ID, cmdErr)
 		}
 		return nil
 	case BucketSuccess:
@@ -582,8 +626,16 @@ func (w *Worker) adoptOrComplete(ctx context.Context, tenant model.Tenant, exec 
 			FinalStatus:  model.ExecutionStatusSucceeded,
 			FinalOutcome: string(model.OutcomeSuccess),
 		}
-		if _, err := w.proposer.Propose("complete_execution", cmd, proposeTimeout); err != nil {
+		result, err := w.proposer.Propose("complete_execution", cmd, proposeTimeout)
+		if err != nil {
 			return fmt.Errorf("propose complete for execution %s: %w", exec.ID, err)
+		}
+		if cmdErr := asCommandError(result); cmdErr != nil {
+			if cmdErr.Kind == command.KindConflict {
+				w.logger.Info("execution already finalized elsewhere", "execution", exec.ID)
+				return nil
+			}
+			return fmt.Errorf("complete execution rejected for execution %s: %w", exec.ID, cmdErr)
 		}
 		return nil
 	case BucketTerminalFailure:
@@ -593,8 +645,16 @@ func (w *Worker) adoptOrComplete(ctx context.Context, tenant model.Tenant, exec 
 			FinalStatus:  model.ExecutionStatusFailedTerminal,
 			FinalOutcome: string(model.OutcomeTerminalFailure),
 		}
-		if _, err := w.proposer.Propose("complete_execution", cmd, proposeTimeout); err != nil {
+		result, err := w.proposer.Propose("complete_execution", cmd, proposeTimeout)
+		if err != nil {
 			return fmt.Errorf("propose complete for execution %s: %w", exec.ID, err)
+		}
+		if cmdErr := asCommandError(result); cmdErr != nil {
+			if cmdErr.Kind == command.KindConflict {
+				w.logger.Info("execution already finalized elsewhere", "execution", exec.ID)
+				return nil
+			}
+			return fmt.Errorf("complete execution rejected for execution %s: %w", exec.ID, cmdErr)
 		}
 		return nil
 	default:
