@@ -10,6 +10,7 @@ import (
 	"raft-biling/internal/node"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 )
 
 //All config flags

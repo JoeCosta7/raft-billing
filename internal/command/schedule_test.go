@@ -382,7 +382,7 @@ func TestApplyCreateSchedule_RecurrenceComputeFails(t *testing.T) {
 		c.ScheduleType = model.ScheduleTypeRecurring
 		c.Recurrence = rec
 		c.FirstRunAt = testTime
-		c.Timezone = "EST"
+		c.Timezone = "Not/A/Real/Zone"
 	})
 	schedule, err := ApplyCreateSchedule(tx, *cmd, proposedAt)
 	if schedule != nil {
