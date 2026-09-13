@@ -285,7 +285,7 @@ func (t *freshFireTask) run(ctx context.Context) error {
 
 	result, err := t.proposer.Propose("record_attempt", recordCmd, proposeTimeout)
 	if err != nil {
-		return fmt.Errorf("propose record attempt for execution %s: %w", execID, err)
+		return fmt.Errorf("callback for execution %s was dispatched but record_attempt failed to commit (relying on receiver-side idempotency-key dedup for correctness): %w", execID, err)
 	}
 	if cmdErr := asCommandError(result); cmdErr != nil {
 		if cmdErr.Kind == command.KindConflict {
@@ -507,9 +507,23 @@ func (t *inFlightTask) runRetry(ctx context.Context, execID string) error {
 		RetryAt:             retryAt,
 	}
 
+	// KNOWN LIMITATION (accepted, not fixed): the HTTP call above already
+	// happened for real by this point. If this node loses leadership or
+	// crashes before this Propose commits, that attempt is never recorded
+	// anywhere — there's no "started" marker written before dispatch, only
+	// the outcome after. This is deliberately not solved with a two-phase
+	// write (mark-dispatching, then record-outcome): that would double the
+	// Propose round-trips on every dispatch, not just this rare failure
+	// window, and still couldn't tell recovery whether the callback actually
+	// succeeded, only that it was attempted. Instead this relies on
+	// X-Scheduler-Idempotency-Key/X-Scheduler-Attempt-Id (set on every
+	// dispatch, see the header-application block above) so a well-behaved
+	// receiver can deduplicate a retried delivery itself. What's lost here
+	// is the scheduler's own audit trail for this one attempt, not
+	// correctness of the callback's real-world effect.
 	result, err := t.proposer.Propose("record_attempt", recordCmd, proposeTimeout)
 	if err != nil {
-		return fmt.Errorf("propose record attempt for execution %s: %w", execID, err)
+		return fmt.Errorf("callback for execution %s was dispatched but record_attempt failed to commit (relying on receiver-side idempotency-key dedup for correctness): %w", execID, err)
 	}
 	if cmdErr := asCommandError(result); cmdErr != nil {
 		if cmdErr.Kind == command.KindConflict {

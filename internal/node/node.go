@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"raft-biling/internal/api"
-	"raft-biling/internal/callback"
 	"raft-biling/internal/config"
 	"raft-biling/internal/raftnode"
 	"raft-biling/internal/scheduler"
@@ -16,7 +15,6 @@ type Node struct {
 	cfg          *config.Config
 	stateMachine *statemachine.StateMachine
 	raftNode     *raftnode.RaftNode
-	callback     *callback.Callback
 	scheduler    *scheduler.Scheduler
 	api          *api.API
 }
@@ -30,11 +28,10 @@ func New(cfg *config.Config) (*Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("raftnode: %w", err)
 	}
-	cb := callback.New(cfg)
-	sch := scheduler.New(rn, sm, cb)
+	sch := scheduler.New(rn, sm)
 	apiSrv := api.New(cfg, rn, sm)
 
-	return &Node{cfg: cfg, stateMachine: sm, raftNode: rn, callback: cb,
+	return &Node{cfg: cfg, stateMachine: sm, raftNode: rn,
 		scheduler: sch, api: apiSrv}, nil
 }
 
@@ -42,7 +39,6 @@ func New(cfg *config.Config) (*Node, error) {
 // Shutdown walks them in reverse calling their Shutdowns. Both respect the context.
 func (n *Node) Start(ctx context.Context) error {
 	n.stateMachine.Start(ctx)
-	n.callback.Start(ctx)
 	if err := n.api.Start(ctx); err != nil {
 		return fmt.Errorf("api start: %w", err)
 	}
@@ -65,7 +61,6 @@ func (n *Node) Shutdown(ctx context.Context) error {
 		errs = append(errs, fmt.Errorf("api shutdown: %w", err))
 	}
 	n.raftNode.Shutdown(ctx)
-	n.callback.Shutdown(ctx)
 	n.stateMachine.Shutdown(ctx)
 	return errors.Join(errs...)
 }

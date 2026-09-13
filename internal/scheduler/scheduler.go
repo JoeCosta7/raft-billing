@@ -3,7 +3,6 @@ package scheduler
 import (
 	"context"
 	"log/slog"
-	"raft-biling/internal/callback"
 	"raft-biling/internal/raftnode"
 	"raft-biling/internal/statemachine"
 )
@@ -15,7 +14,7 @@ type Scheduler struct {
 	done   chan struct{}
 }
 
-func New(rn *raftnode.RaftNode, sm *statemachine.StateMachine, cb *callback.Callback) *Scheduler {
+func New(rn *raftnode.RaftNode, sm *statemachine.StateMachine) *Scheduler {
 	return &Scheduler{rn: rn, logger: slog.Default()}
 }
 
