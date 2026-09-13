@@ -24,16 +24,23 @@ type RaftNode struct {
 	stableStore *raftboltdb.BoltStore
 	transport   *raft.NetworkTransport
 	id          raft.ServerID
+	notifyCh    chan bool
 }
 
 func (rn *RaftNode) TransferLeadership() error {
 	return rn.raft.LeadershipTransfer().Error()
 }
 
+func (rn *RaftNode) LeadershipCh() <-chan bool {
+	return rn.notifyCh
+}
+
 func New(cfg *config.Config, st storage.Storage, fsm *statemachine.StateMachine) (*RaftNode, error) {
 	localID := raft.ServerID(cfg.NodeID)
 	config := raft.DefaultConfig()
 	config.LocalID = localID
+	notifyCh := make(chan bool, 1)
+	config.NotifyCh = notifyCh
 	logStore, err := raftboltdb.NewBoltStore(filepath.Join(cfg.DataDir, "raft-log.db"))
 	if err != nil {
 		return nil, fmt.Errorf("Could not create logStore : %w", err)
@@ -80,6 +87,7 @@ func New(cfg *config.Config, st storage.Storage, fsm *statemachine.StateMachine)
 		stableStore: stableStore,
 		transport:   transport,
 		id:          localID,
+		notifyCh:    notifyCh,
 	}, nil
 
 }
@@ -101,6 +109,23 @@ func (rn *RaftNode) GetSchedule(tenantID, id string) (*model.Schedule, error) {
 		return nil, err
 	}
 	return schedule, nil
+}
+
+func (rn *RaftNode) ListSchedulesDue(tenantID string) ([]*model.Schedule, error) {
+	if rn.raft.State() != raft.Leader {
+		return nil, fmt.Errorf("failed to ListSchedulesDue on node %v", string(rn.raft.Leader()))
+	}
+	var schedules []*model.Schedule
+	err := rn.storage.View(func(tx storage.Tx) error {
+		return tx.ListSchedulesDue(tenantID, time.Now(), func(s *model.Schedule) error {
+			schedules = append(schedules, s)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return schedules, nil
 }
 
 func (rn *RaftNode) GetTenant(tenantID string) (*model.Tenant, error) {

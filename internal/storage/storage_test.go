@@ -340,6 +340,105 @@ func TestStorage_ListExecutionsByStatus_HappyPath(t *testing.T) {
 
 }
 
+func TestStorage_ListSchedulesDue_HappyPath(t *testing.T) {
+	s := newTestStorage(t)
+	past := testTime.Add(-1 * time.Hour)
+	future := testTime.Add(1 * time.Hour)
+
+	dueA := newTestSchedule(func(sc *model.Schedule) {
+		sc.ID = sched1a
+		sc.Status = model.ScheduleStatusActive
+		sc.NextRunAt = &past
+	})
+	dueAtNow := newTestSchedule(func(sc *model.Schedule) {
+		sc.ID = sched1b
+		sc.Status = model.ScheduleStatusActive
+		sc.NextRunAt = &testTime // NextRunAt == now must count as due
+	})
+	notYetDue := newTestSchedule(func(sc *model.Schedule) {
+		sc.ID = "sched_not_yet_due"
+		sc.Status = model.ScheduleStatusActive
+		sc.NextRunAt = &future
+	})
+	pausedButOverdue := newTestSchedule(func(sc *model.Schedule) {
+		sc.ID = "sched_paused"
+		sc.Status = model.ScheduleStatusPaused
+		sc.NextRunAt = &past
+	})
+	activeNoNextRun := newTestSchedule(func(sc *model.Schedule) {
+		sc.ID = "sched_no_next_run"
+		sc.Status = model.ScheduleStatusActive
+		sc.NextRunAt = nil
+	})
+	otherTenant := newTestSchedule(func(sc *model.Schedule) {
+		sc.ID = schedB1
+		sc.TenantID = tenantB
+		sc.Status = model.ScheduleStatusActive
+		sc.NextRunAt = &past
+	})
+
+	if err := s.Update(func(tx Tx) error {
+		for _, sc := range []*model.Schedule{dueA, dueAtNow, notYetDue, pausedButOverdue, activeNoNextRun, otherTenant} {
+			if err := tx.PutSchedule(sc); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	var ids []string
+	if err := s.View(func(tx Tx) error {
+		return tx.ListSchedulesDue(testTenantID, testTime, func(sc *model.Schedule) error {
+			ids = append(ids, sc.ID)
+			return nil
+		})
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+
+	expected := []string{sched1a, sched1b}
+	slices.Sort(ids)
+	slices.Sort(expected)
+	if !slices.Equal(ids, expected) {
+		t.Fatalf("ids mismatch:\ngot:  %+v\nwant: %+v (paused, not-yet-due, nil-NextRunAt, and other-tenant schedules must be excluded)", ids, expected)
+	}
+}
+
+func TestStorage_PutSchedule_StatusTransitionCleansStaleIndex(t *testing.T) {
+	s := newTestStorage(t)
+	past := testTime.Add(-1 * time.Hour)
+	schedule := newTestSchedule(func(sc *model.Schedule) {
+		sc.ID = sched1a
+		sc.Status = model.ScheduleStatusActive
+		sc.NextRunAt = &past
+	})
+	if err := s.Update(func(tx Tx) error { return tx.PutSchedule(schedule) }); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Pause it — must disappear from the due index even though NextRunAt is
+	// still in the past.
+	schedule.Status = model.ScheduleStatusPaused
+	if err := s.Update(func(tx Tx) error { return tx.PutSchedule(schedule) }); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	dueCount := 0
+	if err := s.View(func(tx Tx) error {
+		return tx.ListSchedulesDue(testTenantID, testTime, func(sc *model.Schedule) error {
+			dueCount++
+			return nil
+		})
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	if dueCount != 0 {
+		t.Errorf("ListSchedulesDue count after pause: got %d, want 0 (stale active-index entry not cleaned up)", dueCount)
+	}
+}
+
 func TestStorage_ListAttemptsByExecution_HappyPath(t *testing.T) {
 	s := newTestStorage(t)
 	execution := newTestExecution(func(e *model.Execution) { e.ID = exec1a })

@@ -36,6 +36,7 @@ type Tx interface {
 	ListExecutionsBySchedule(tenantID, scheduleID string, fn func(*model.Execution) error) error
 	ListExecutionsByStatus(tenantID string, status model.ExecutionStatus, fn func(*model.Execution) error) error
 	ListAttemptsByExecution(tenantID, executionID string, fn func(*model.Attempt) error) error
+	ListSchedulesDue(tenantID string, now time.Time, fn func(*model.Schedule) error) error
 }
 
 const (
@@ -46,6 +47,7 @@ const (
 	bucketExecutionsBySchedule = "executions_by_schedule"
 	bucketExecutionsByStatus   = "executions_by_status"
 	bucketAttemptsByExecution  = "attempts_by_execution"
+	bucketSchedulesByStatus    = "schedules_by_status"
 )
 
 // bbolt implementation
@@ -92,6 +94,7 @@ func New(dataDir string) (*BoltStorage, error) {
 			[]byte(bucketExecutionsBySchedule),
 			[]byte(bucketExecutionsByStatus),
 			[]byte(bucketAttemptsByExecution),
+			[]byte(bucketSchedulesByStatus),
 		}
 		for _, b := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
@@ -137,13 +140,34 @@ func attemptsByExecutionKey(tenantID, executionID, id string) []byte {
 	return []byte(tenantID + ":" + executionID + ":" + id)
 }
 
+func scheduleByStatusKey(tenantID, status, id string) []byte {
+	return []byte(tenantID + ":" + status + ":" + id)
+}
+
 func (t *boltTx) PutSchedule(s *model.Schedule) error {
+	oldRow, err := t.GetSchedule(s.TenantID, s.ID)
+	if err != nil {
+		return fmt.Errorf("Could not find the schedule %w", err)
+	}
+	if oldRow != nil {
+		err := t.tx.Bucket([]byte(bucketSchedulesByStatus)).Delete(scheduleByStatusKey(oldRow.TenantID, string(oldRow.Status), oldRow.ID))
+		if err != nil {
+			return fmt.Errorf("Delete was not successful %w", err)
+		}
+	}
 	jsonData, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}
 	key := scheduleKey(s.TenantID, s.ID)
-	return t.tx.Bucket([]byte(bucketSchedules)).Put(key, jsonData)
+	statusKey := scheduleByStatusKey(s.TenantID, string(s.Status), s.ID)
+	if err := t.tx.Bucket([]byte(bucketSchedules)).Put(key, jsonData); err != nil {
+		return fmt.Errorf("Put to Schedules Bucket was unsuccessful %w", err)
+	}
+	if err := t.tx.Bucket([]byte(bucketSchedulesByStatus)).Put(statusKey, nil); err != nil {
+		return fmt.Errorf("Put to Schedules By Status Bucket was unsuccessful %w", err)
+	}
+	return nil
 }
 
 func (t *boltTx) GetSchedule(tenantID, id string) (*model.Schedule, error) {
@@ -307,6 +331,29 @@ func (t *boltTx) ListExecutionsByStatus(tenantID string, status model.ExecutionS
 			return fmt.Errorf("index entry references missing execution: tenant=%s exec_id=%s", tenantID, execID)
 		}
 		if err := fn(exec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *boltTx) ListSchedulesDue(tenantID string, now time.Time, fn func(*model.Schedule) error) error {
+	b := t.tx.Bucket([]byte(bucketSchedulesByStatus))
+	c := b.Cursor()
+	prefix := []byte(tenantID + ":" + string(model.ScheduleStatusActive) + ":")
+	for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+		schedID := string(bytes.TrimPrefix(k, prefix))
+		sched, err := t.GetSchedule(tenantID, schedID)
+		if err != nil {
+			return err
+		}
+		if sched == nil {
+			return fmt.Errorf("index entry references missing schedule: tenant=%s schedule_id=%s", tenantID, schedID)
+		}
+		if sched.NextRunAt == nil || sched.NextRunAt.After(now) {
+			continue
+		}
+		if err := fn(sched); err != nil {
 			return err
 		}
 	}

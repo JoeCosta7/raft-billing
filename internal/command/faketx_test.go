@@ -140,6 +140,26 @@ func (f *fakeTx) ListAttemptsByExecution(tenantID, executionID string, fn func(*
 	return nil
 }
 
+func (f *fakeTx) ListSchedulesDue(tenantID string, now time.Time, fn func(*model.Schedule) error) error {
+	var matches []*model.Schedule
+	for _, s := range f.schedules {
+		if s.TenantID != tenantID || s.Status != model.ScheduleStatusActive {
+			continue
+		}
+		if s.NextRunAt == nil || s.NextRunAt.After(now) {
+			continue
+		}
+		matches = append(matches, s)
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+	for _, s := range matches {
+		if err := fn(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func newTestSchedule(overrides ...func(*model.Schedule)) *model.Schedule {
 	dayOfMonth := 15
 	sch := &model.Schedule{
