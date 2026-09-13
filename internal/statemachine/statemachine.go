@@ -105,5 +105,8 @@ func New(cfg *config.Config) (*StateMachine, error) {
 	return &StateMachine{storage: store, db: store.DB(), dataDir: cfg.DataDir}, nil
 }
 
-func (statemachine *StateMachine) Start(ctx context.Context) error    { return nil }
-func (statemachine *StateMachine) Shutdown(ctx context.Context) error { return nil }
+func (statemachine *StateMachine) Start(ctx context.Context) error { return nil }
+
+func (statemachine *StateMachine) Shutdown(ctx context.Context) error {
+	return statemachine.storage.Close()
+}
