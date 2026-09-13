@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"raft-biling/internal/command"
 	"raft-biling/internal/config"
 	"raft-biling/internal/storage"
@@ -18,7 +17,6 @@ import (
 type StateMachine struct {
 	storage storage.Storage
 	db      *bolt.DB
-	dataDir string
 }
 
 type FSMSnapshot struct {
@@ -60,29 +58,28 @@ func (sm *StateMachine) Snapshot() (raft.FSMSnapshot, error) {
 
 func (sm *StateMachine) Restore(rc io.ReadCloser) error {
 	defer rc.Close()
-	err := sm.db.Close()
-	if err != nil {
+	path := sm.db.Path()
+	if err := sm.db.Close(); err != nil {
 		return err
 	}
-	path := filepath.Join(sm.dataDir, "state.db")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	_, err = io.Copy(file, rc)
-	if err != nil {
+	if _, err := io.Copy(file, rc); err != nil {
 		return err
 	}
-	file.Close()
+	if err := file.Close(); err != nil {
+		return err
+	}
 	newDB, err := bolt.Open(path, 0600, nil)
 	if err != nil {
 		return err
 	}
 	sm.db = newDB
-
+	sm.storage = storage.FromDB(newDB)
 	return nil
-
 }
 
 func (s *FSMSnapshot) Persist(sink raft.SnapshotSink) error {
@@ -102,7 +99,7 @@ func New(cfg *config.Config) (*StateMachine, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &StateMachine{storage: store, db: store.DB(), dataDir: cfg.DataDir}, nil
+	return &StateMachine{storage: store, db: store.DB()}, nil
 }
 
 func (statemachine *StateMachine) Start(ctx context.Context) error { return nil }

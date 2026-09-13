@@ -75,6 +75,11 @@ func (s *BoltStorage) DB() *bolt.DB {
 	return s.db
 }
 
+// FromDB wraps an already-open bbolt database.
+func FromDB(db *bolt.DB) *BoltStorage {
+	return &BoltStorage{db: db}
+}
+
 func New(dataDir string) (*BoltStorage, error) {
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, err
