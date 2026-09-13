@@ -1582,3 +1582,137 @@ func TestFreshFireTask_Run_CompleteExecution_Conflict_Swallowed(t *testing.T) {
 		t.Fatalf("calls: got %d, want 2 (record_attempt then complete_execution): %+v", len(base.calls), base.calls)
 	}
 }
+
+// TestFreshFireTask_Run_SetsIdempotencyAndAttemptHeaders proves the reserved
+// scheduler headers actually land on the outbound request — they were
+// declared in model.ReservedHeaderKeys but never set anywhere before this.
+func TestFreshFireTask_Run_SetsIdempotencyAndAttemptHeaders(t *testing.T) {
+	const (
+		tenantID   = "tenant-1"
+		scheduleID = "sched-1"
+		execID     = "exec-1"
+		nodeID     = "test-node"
+		idemKey    = "sched-1:2026-01-01T00:00:00Z"
+	)
+	var gotIdemKey, gotAttemptID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIdemKey = r.Header.Get(model.HeaderIdempotencyKey)
+		gotAttemptID = r.Header.Get(model.HeaderAttemptID)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	proposer := newApplyingProposer(t, nodeID)
+	err := proposer.store.Update(func(tx storage.Tx) error {
+		if err := tx.PutTenant(&model.Tenant{ID: tenantID}); err != nil {
+			return err
+		}
+		if err := tx.PutSchedule(&model.Schedule{
+			TenantID:    tenantID,
+			ID:          scheduleID,
+			Status:      model.ScheduleStatusActive,
+			CallbackURL: server.URL,
+			Payload:     []byte("{}"),
+			MaxAttempts: 3,
+		}); err != nil {
+			return err
+		}
+		return tx.PutExecution(&model.Execution{
+			TenantID:    tenantID,
+			ID:          execID,
+			ScheduleID:  scheduleID,
+			Status:      model.ExecutionStatusInFlight,
+			OwnerNodeID: nodeID,
+		})
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	task := &freshFireTask{
+		exec:               model.Execution{TenantID: tenantID, ID: execID, ScheduleID: scheduleID, IdempotencyKey: idemKey},
+		nodeID:             nodeID,
+		reader:             &boltReader{store: proposer.store},
+		proposer:           proposer,
+		httpClient:         &http.Client{},
+		logger:             slog.New(slog.DiscardHandler),
+		defaultCallTimeout: model.DefaultCallTimeout,
+	}
+
+	if err := task.run(context.Background()); err != nil {
+		t.Fatalf("run: unexpected error: %v", err)
+	}
+	if gotIdemKey != idemKey {
+		t.Errorf("%s header: got %q, want %q", model.HeaderIdempotencyKey, gotIdemKey, idemKey)
+	}
+	if gotAttemptID == "" {
+		t.Errorf("%s header: got empty, want a generated attempt ID", model.HeaderAttemptID)
+	}
+}
+
+// TestInFlightTask_RunRetry_SetsIdempotencyAndAttemptHeaders is the same
+// proof for the retry dispatch path.
+func TestInFlightTask_RunRetry_SetsIdempotencyAndAttemptHeaders(t *testing.T) {
+	const (
+		tenantID   = "tenant-1"
+		scheduleID = "sched-1"
+		execID     = "exec-1"
+		nodeID     = "test-node"
+		idemKey    = "sched-1:2026-01-01T00:00:00Z"
+	)
+	var gotIdemKey, gotAttemptID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIdemKey = r.Header.Get(model.HeaderIdempotencyKey)
+		gotAttemptID = r.Header.Get(model.HeaderAttemptID)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	proposer := newApplyingProposer(t, nodeID)
+	err := proposer.store.Update(func(tx storage.Tx) error {
+		if err := tx.PutTenant(&model.Tenant{ID: tenantID}); err != nil {
+			return err
+		}
+		if err := tx.PutSchedule(&model.Schedule{
+			TenantID:    tenantID,
+			ID:          scheduleID,
+			Status:      model.ScheduleStatusActive,
+			CallbackURL: server.URL,
+			Payload:     []byte("{}"),
+			MaxAttempts: 3,
+		}); err != nil {
+			return err
+		}
+		return tx.PutExecution(&model.Execution{
+			TenantID:     tenantID,
+			ID:           execID,
+			ScheduleID:   scheduleID,
+			Status:       model.ExecutionStatusInFlight,
+			OwnerNodeID:  nodeID,
+			AttemptCount: 1,
+		})
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	task := &inFlightTask{
+		exec:               model.Execution{TenantID: tenantID, ID: execID, ScheduleID: scheduleID, AttemptCount: 1, IdempotencyKey: idemKey},
+		kind:               KindRetry,
+		reader:             &boltReader{store: proposer.store},
+		proposer:           proposer,
+		httpClient:         &http.Client{},
+		logger:             slog.New(slog.DiscardHandler),
+		defaultCallTimeout: model.DefaultCallTimeout,
+	}
+
+	if err := task.run(context.Background()); err != nil {
+		t.Fatalf("run: unexpected error: %v", err)
+	}
+	if gotIdemKey != idemKey {
+		t.Errorf("%s header: got %q, want %q", model.HeaderIdempotencyKey, gotIdemKey, idemKey)
+	}
+	if gotAttemptID == "" {
+		t.Errorf("%s header: got empty, want a generated attempt ID", model.HeaderAttemptID)
+	}
+}

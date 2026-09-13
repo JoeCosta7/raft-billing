@@ -20,10 +20,19 @@ const (
 	MaxCallTimeout = 5 * time.Minute
 )
 
+// HeaderIdempotencyKey and HeaderAttemptID are set by the scheduler itself on
+// every dispatch (see worker.go) so a receiver can deduplicate a retried or
+// double-delivered callback. Named here, not just inlined into
+// ReservedHeaderKeys, so the dispatch site and the reservation can't drift.
+const (
+	HeaderIdempotencyKey = "X-Scheduler-Idempotency-Key"
+	HeaderAttemptID      = "X-Scheduler-Attempt-Id"
+)
+
 var ReservedHeaderKeys = map[string]struct{}{
-	textproto.CanonicalMIMEHeaderKey("Content-Type"):                {},
-	textproto.CanonicalMIMEHeaderKey("X-Scheduler-Idempotency-Key"): {},
-	textproto.CanonicalMIMEHeaderKey("X-Scheduler-Attempt-Id"):      {},
+	textproto.CanonicalMIMEHeaderKey("Content-Type"):       {},
+	textproto.CanonicalMIMEHeaderKey(HeaderIdempotencyKey): {},
+	textproto.CanonicalMIMEHeaderKey(HeaderAttemptID):      {},
 }
 
 const (

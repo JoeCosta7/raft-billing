@@ -226,7 +226,14 @@ func (t *freshFireTask) run(ctx context.Context) error {
 	for k, v := range t.schedule.Headers {
 		req.Header.Set(k, v)
 	}
+	// Scheduler-owned headers are applied last so they always win over any
+	// operator-supplied header of the same name (validateHeaders also
+	// rejects these at schedule-creation time — this is defense in depth,
+	// not the only guarantee). IdempotencyKey and attemptID let a receiver
+	// deduplicate a retried or double-delivered callback.
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(model.HeaderIdempotencyKey, t.exec.IdempotencyKey)
+	req.Header.Set(model.HeaderAttemptID, attemptID)
 	bodyHash := sha256.Sum256(body)
 	resp, doErr := t.httpClient.Do(req)
 	if errors.Is(doErr, context.Canceled) {
@@ -446,7 +453,14 @@ func (t *inFlightTask) runRetry(ctx context.Context, execID string) error {
 	for k, v := range t.schedule.Headers {
 		req.Header.Set(k, v)
 	}
+	// Scheduler-owned headers are applied last so they always win over any
+	// operator-supplied header of the same name (validateHeaders also
+	// rejects these at schedule-creation time — this is defense in depth,
+	// not the only guarantee). IdempotencyKey and attemptID let a receiver
+	// deduplicate a retried or double-delivered callback.
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(model.HeaderIdempotencyKey, t.exec.IdempotencyKey)
+	req.Header.Set(model.HeaderAttemptID, attemptID)
 	bodyHash := sha256.Sum256(body)
 	resp, doErr := t.httpClient.Do(req)
 	if errors.Is(doErr, context.Canceled) {
