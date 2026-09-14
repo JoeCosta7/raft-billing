@@ -18,6 +18,7 @@ type Proposer interface {
 	Propose(cmdType string, cmd any, timeout time.Duration) (any, error)
 	ID() string
 	TransferLeadership() error
+	Barrier(timeout time.Duration) error
 }
 
 type Runner interface {

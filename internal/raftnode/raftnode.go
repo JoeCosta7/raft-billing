@@ -31,6 +31,10 @@ func (rn *RaftNode) TransferLeadership() error {
 	return rn.raft.LeadershipTransfer().Error()
 }
 
+func (rn *RaftNode) Barrier(timeout time.Duration) error {
+	return rn.raft.Barrier(timeout).Error()
+}
+
 func (rn *RaftNode) LeadershipCh() <-chan bool {
 	return rn.notifyCh
 }

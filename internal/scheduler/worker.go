@@ -576,6 +576,9 @@ func (w *Worker) runRecover(ctx context.Context) (err error) {
 			err = fmt.Errorf("recover: panic during recovery: %v\n%s", r, debug.Stack())
 		}
 	}()
+	if err := w.proposer.Barrier(proposeTimeout); err != nil {
+		return fmt.Errorf("barrier before recovery: %w", err)
+	}
 
 	tenants, err := w.reader.ListTenants()
 	if err != nil {

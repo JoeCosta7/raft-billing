@@ -13,12 +13,6 @@ import (
 	"time"
 )
 
-// Every prior test in this codebase bootstraps a single node — which proves
-// the wiring works, but proves nothing about actual consensus: replication
-// to followers, real leader election among multiple candidates, or recovery
-// firing against genuinely replicated state after a real failover. These
-// tests build real 3-node clusters to close that gap.
-
 func durationPtr(d time.Duration) *time.Duration { return &d }
 
 type testCluster struct {

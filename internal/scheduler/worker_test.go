@@ -153,8 +153,9 @@ func newApplyingProposer(t *testing.T, nodeID string) *applyingProposer {
 	return &applyingProposer{store: store, nodeID: nodeID}
 }
 
-func (p *applyingProposer) ID() string                { return p.nodeID }
-func (p *applyingProposer) TransferLeadership() error { return nil }
+func (p *applyingProposer) ID() string                          { return p.nodeID }
+func (p *applyingProposer) TransferLeadership() error           { return nil }
+func (p *applyingProposer) Barrier(timeout time.Duration) error { return nil }
 
 func (p *applyingProposer) Propose(cmdType string, cmd any, timeout time.Duration) (any, error) {
 	if p.forceErr != nil {
