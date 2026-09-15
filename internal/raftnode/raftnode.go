@@ -3,6 +3,7 @@ package raftnode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,11 +12,17 @@ import (
 	"raft-biling/internal/model"
 	"raft-biling/internal/statemachine"
 	"raft-biling/internal/storage"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
 )
+
+// barrierTimeout bounds the one-time-per-term wait in ensureCaughtUpAsLeader.
+const barrierTimeout = 5 * time.Second
+
+var ErrNotCaughtUp = errors.New("leader elected but not yet caught up")
 
 type RaftNode struct {
 	raft        *raft.Raft
@@ -25,14 +32,28 @@ type RaftNode struct {
 	transport   *raft.NetworkTransport
 	id          raft.ServerID
 	notifyCh    chan bool
+	readyMu     sync.Mutex
+	readyTerm   uint64
 }
 
 func (rn *RaftNode) TransferLeadership() error {
 	return rn.raft.LeadershipTransfer().Error()
 }
 
-func (rn *RaftNode) Barrier(timeout time.Duration) error {
-	return rn.raft.Barrier(timeout).Error()
+// ensureCaughtUpAsLeader blocks until this node's local FSM has applied
+// every entry committed under any previous leader term
+func (rn *RaftNode) ensureCaughtUpAsLeader() error {
+	term := rn.raft.CurrentTerm()
+	rn.readyMu.Lock()
+	defer rn.readyMu.Unlock()
+	if rn.readyTerm == term {
+		return nil
+	}
+	if err := rn.raft.Barrier(barrierTimeout).Error(); err != nil {
+		return fmt.Errorf("%w: %v", ErrNotCaughtUp, err)
+	}
+	rn.readyTerm = term
+	return nil
 }
 
 func (rn *RaftNode) LeadershipCh() <-chan bool {
@@ -100,6 +121,9 @@ func (rn *RaftNode) GetSchedule(tenantID, id string) (*model.Schedule, error) {
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("failed to GetSchedule on node %v", string(rn.raft.Leader()))
 	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, err
+	}
 	var schedule *model.Schedule
 	err := rn.storage.View(func(tx storage.Tx) error {
 		s, err := tx.GetSchedule(tenantID, id)
@@ -119,6 +143,9 @@ func (rn *RaftNode) ListSchedulesDue(tenantID string) ([]*model.Schedule, error)
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("failed to ListSchedulesDue on node %v", string(rn.raft.Leader()))
 	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, err
+	}
 	var schedules []*model.Schedule
 	err := rn.storage.View(func(tx storage.Tx) error {
 		return tx.ListSchedulesDue(tenantID, time.Now(), func(s *model.Schedule) error {
@@ -135,6 +162,9 @@ func (rn *RaftNode) ListSchedulesDue(tenantID string) ([]*model.Schedule, error)
 func (rn *RaftNode) GetTenant(tenantID string) (*model.Tenant, error) {
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("not leader; current leader is %s", rn.raft.Leader())
+	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, err
 	}
 	var tenant *model.Tenant
 	err := rn.storage.View(func(tx storage.Tx) error {
@@ -155,6 +185,9 @@ func (rn *RaftNode) ListTenants() ([]*model.Tenant, error) {
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("failed to ListTenants on node %v", string(rn.raft.Leader()))
 	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, err
+	}
 	var tenants []*model.Tenant
 	err := rn.storage.View(func(tx storage.Tx) error {
 		ts, err := tx.ListTenants()
@@ -173,6 +206,9 @@ func (rn *RaftNode) ListTenants() ([]*model.Tenant, error) {
 func (rn *RaftNode) GetExecution(tenantID, id string) (*model.Execution, error) {
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("failed to GetExecution on node %v", string(rn.raft.Leader()))
+	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, err
 	}
 	var execution *model.Execution
 	err := rn.storage.View(func(tx storage.Tx) error {
@@ -193,6 +229,9 @@ func (rn *RaftNode) GetAttempt(tenantID, id string) (*model.Attempt, error) {
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("failed to GetAttempt on node %v", string(rn.raft.Leader()))
 	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, err
+	}
 	var attempt *model.Attempt
 	err := rn.storage.View(func(tx storage.Tx) error {
 		at, err := tx.GetAttempt(tenantID, id)
@@ -211,6 +250,9 @@ func (rn *RaftNode) GetAttempt(tenantID, id string) (*model.Attempt, error) {
 func (rn *RaftNode) ListExecutionsBySchedule(tenantID, scheduleID string) ([]*model.Execution, error) {
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("failed to ListExecutionsBySchedule on node %v", string(rn.raft.Leader()))
+	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, err
 	}
 	var executions []*model.Execution
 	err := rn.storage.View(func(tx storage.Tx) error {
@@ -233,6 +275,9 @@ func (rn *RaftNode) ListExecutionsByStatus(tenantID string, status model.Executi
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("failed to ListExecutionsByStatus on node %v", string(rn.raft.Leader()))
 	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, err
+	}
 	var executions []*model.Execution
 	err := rn.storage.View(func(tx storage.Tx) error {
 		err := tx.ListExecutionsByStatus(tenantID, status, func(ex *model.Execution) error {
@@ -253,6 +298,9 @@ func (rn *RaftNode) ListExecutionsByStatus(tenantID string, status model.Executi
 func (rn *RaftNode) ListAttemptsByExecution(tenantID, executionID string) ([]*model.Attempt, error) {
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("failed to ListAttemptsByExecution on node %v", string(rn.raft.Leader()))
+	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, err
 	}
 	var attempts []*model.Attempt
 	err := rn.storage.View(func(tx storage.Tx) error {

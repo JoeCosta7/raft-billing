@@ -105,6 +105,14 @@ func asCommandError(result any) *command.CommandError {
 	return cmdErr
 }
 
+func writeReadError(w http.ResponseWriter, err error) {
+	if errors.Is(err, raftnode.ErrNotCaughtUp) {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeError(w, http.StatusInternalServerError, err.Error())
+}
+
 func statusForCommandErrorKind(kind string) int {
 	switch kind {
 	case command.KindValidation:
@@ -191,7 +199,7 @@ func (a *API) handleListTenants(w http.ResponseWriter, r *http.Request) {
 	}
 	tenants, err := a.backend.ListTenants()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeReadError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, tenants)
@@ -203,7 +211,7 @@ func (a *API) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant, err := a.backend.GetTenant(r.PathValue("tenantID"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeReadError(w, err)
 		return
 	}
 	if tenant == nil {
@@ -219,7 +227,7 @@ func (a *API) handleGetSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	schedule, err := a.backend.GetSchedule(r.PathValue("tenantID"), r.PathValue("scheduleID"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeReadError(w, err)
 		return
 	}
 	if schedule == nil {
@@ -235,7 +243,7 @@ func (a *API) handleListExecutionsBySchedule(w http.ResponseWriter, r *http.Requ
 	}
 	executions, err := a.backend.ListExecutionsBySchedule(r.PathValue("tenantID"), r.PathValue("scheduleID"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeReadError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, executions)
@@ -252,7 +260,7 @@ func (a *API) handleListExecutionsByStatus(w http.ResponseWriter, r *http.Reques
 	}
 	executions, err := a.backend.ListExecutionsByStatus(r.PathValue("tenantID"), model.ExecutionStatus(status))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeReadError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, executions)
@@ -264,7 +272,7 @@ func (a *API) handleGetExecution(w http.ResponseWriter, r *http.Request) {
 	}
 	execution, err := a.backend.GetExecution(r.PathValue("tenantID"), r.PathValue("executionID"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeReadError(w, err)
 		return
 	}
 	if execution == nil {
@@ -280,7 +288,7 @@ func (a *API) handleListAttemptsByExecution(w http.ResponseWriter, r *http.Reque
 	}
 	attempts, err := a.backend.ListAttemptsByExecution(r.PathValue("tenantID"), r.PathValue("executionID"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeReadError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, attempts)
@@ -292,7 +300,7 @@ func (a *API) handleGetAttempt(w http.ResponseWriter, r *http.Request) {
 	}
 	attempt, err := a.backend.GetAttempt(r.PathValue("tenantID"), r.PathValue("attemptID"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeReadError(w, err)
 		return
 	}
 	if attempt == nil {
