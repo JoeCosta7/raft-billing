@@ -147,45 +147,123 @@ func (a *API) propose(w http.ResponseWriter, cmdType string, cmd any) (result an
 
 // ---- write handlers ----
 
+// sanitizeTenant returns a copy of t with APIKeyHash cleared. Unlike a
+// plaintext key, the hash isn't independently dangerous if it leaked (SHA-256
+// isn't reversible), but there's no reason to send internal auth material
+// to a client either way, and this is the one place in the codebase where a
+// *model.Tenant crosses the process boundary — every response that includes
+// one goes through here.
+func sanitizeTenant(t *model.Tenant) *model.Tenant {
+	if t == nil {
+		return nil
+	}
+	sanitized := *t
+	sanitized.APIKeyHash = ""
+	return &sanitized
+}
+
+func sanitizeTenants(ts []*model.Tenant) []*model.Tenant {
+	out := make([]*model.Tenant, len(ts))
+	for i, t := range ts {
+		out[i] = sanitizeTenant(t)
+	}
+	return out
+}
+
+// createTenantResponse embeds the (sanitized) tenant plus the one-time
+// plaintext API key — the only place that key ever appears, generated
+// fresh per request and never persisted anywhere.
+type createTenantResponse struct {
+	*model.Tenant
+	APIKey string `json:"api_key"`
+}
+
 func (a *API) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
+	if !a.requireLeader(w) {
+		return
+	}
+	if !a.requireAdmin(w, r) {
+		return
+	}
 	var cmd command.CreateTenantCommand
 	if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	if result, ok := a.propose(w, "create_tenant", cmd); ok {
-		writeJSON(w, http.StatusCreated, result)
+	plaintext, hash, err := generateAPIKey()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate API key: "+err.Error())
+		return
 	}
+	cmd.APIKeyHash = hash
+	result, ok := a.propose(w, "create_tenant", cmd)
+	if !ok {
+		return
+	}
+	tenant, ok := result.(*model.Tenant)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "unexpected result type from create_tenant")
+		return
+	}
+	writeJSON(w, http.StatusCreated, createTenantResponse{Tenant: sanitizeTenant(tenant), APIKey: plaintext})
 }
 
 func (a *API) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
+	if !a.requireLeader(w) {
+		return
+	}
+	tenantID := r.PathValue("tenantID")
+	if !a.requireTenantAccess(w, r, tenantID) {
+		return
+	}
 	var cmd command.CreateScheduleCommand
 	if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	cmd.TenantID = r.PathValue("tenantID")
+	cmd.TenantID = tenantID
 	if result, ok := a.propose(w, "create_schedule", cmd); ok {
 		writeJSON(w, http.StatusCreated, result)
 	}
 }
 
 func (a *API) handlePauseSchedule(w http.ResponseWriter, r *http.Request) {
-	cmd := command.PauseScheduleCommand{TenantID: r.PathValue("tenantID"), ID: r.PathValue("scheduleID")}
+	if !a.requireLeader(w) {
+		return
+	}
+	tenantID := r.PathValue("tenantID")
+	if !a.requireTenantAccess(w, r, tenantID) {
+		return
+	}
+	cmd := command.PauseScheduleCommand{TenantID: tenantID, ID: r.PathValue("scheduleID")}
 	if result, ok := a.propose(w, "pause_schedule", cmd); ok {
 		writeJSON(w, http.StatusOK, result)
 	}
 }
 
 func (a *API) handleCancelSchedule(w http.ResponseWriter, r *http.Request) {
-	cmd := command.CancelScheduleCommand{TenantID: r.PathValue("tenantID"), ID: r.PathValue("scheduleID")}
+	if !a.requireLeader(w) {
+		return
+	}
+	tenantID := r.PathValue("tenantID")
+	if !a.requireTenantAccess(w, r, tenantID) {
+		return
+	}
+	cmd := command.CancelScheduleCommand{TenantID: tenantID, ID: r.PathValue("scheduleID")}
 	if result, ok := a.propose(w, "cancel_schedule", cmd); ok {
 		writeJSON(w, http.StatusOK, result)
 	}
 }
 
 func (a *API) handleResumeSchedule(w http.ResponseWriter, r *http.Request) {
-	cmd := command.ResumeScheduleCommand{TenantID: r.PathValue("tenantID"), ID: r.PathValue("scheduleID")}
+	if !a.requireLeader(w) {
+		return
+	}
+	tenantID := r.PathValue("tenantID")
+	if !a.requireTenantAccess(w, r, tenantID) {
+		return
+	}
+	cmd := command.ResumeScheduleCommand{TenantID: tenantID, ID: r.PathValue("scheduleID")}
 	if result, ok := a.propose(w, "resume_schedule", cmd); ok {
 		writeJSON(w, http.StatusOK, result)
 	}
@@ -197,19 +275,26 @@ func (a *API) handleListTenants(w http.ResponseWriter, r *http.Request) {
 	if !a.requireLeader(w) {
 		return
 	}
+	if !a.requireAdmin(w, r) {
+		return
+	}
 	tenants, err := a.backend.ListTenants()
 	if err != nil {
 		writeReadError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, tenants)
+	writeJSON(w, http.StatusOK, sanitizeTenants(tenants))
 }
 
 func (a *API) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 	if !a.requireLeader(w) {
 		return
 	}
-	tenant, err := a.backend.GetTenant(r.PathValue("tenantID"))
+	tenantID := r.PathValue("tenantID")
+	if !a.requireTenantAccess(w, r, tenantID) {
+		return
+	}
+	tenant, err := a.backend.GetTenant(tenantID)
 	if err != nil {
 		writeReadError(w, err)
 		return
@@ -218,14 +303,18 @@ func (a *API) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "tenant not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, tenant)
+	writeJSON(w, http.StatusOK, sanitizeTenant(tenant))
 }
 
 func (a *API) handleGetSchedule(w http.ResponseWriter, r *http.Request) {
 	if !a.requireLeader(w) {
 		return
 	}
-	schedule, err := a.backend.GetSchedule(r.PathValue("tenantID"), r.PathValue("scheduleID"))
+	tenantID := r.PathValue("tenantID")
+	if !a.requireTenantAccess(w, r, tenantID) {
+		return
+	}
+	schedule, err := a.backend.GetSchedule(tenantID, r.PathValue("scheduleID"))
 	if err != nil {
 		writeReadError(w, err)
 		return
@@ -241,7 +330,11 @@ func (a *API) handleListExecutionsBySchedule(w http.ResponseWriter, r *http.Requ
 	if !a.requireLeader(w) {
 		return
 	}
-	executions, err := a.backend.ListExecutionsBySchedule(r.PathValue("tenantID"), r.PathValue("scheduleID"))
+	tenantID := r.PathValue("tenantID")
+	if !a.requireTenantAccess(w, r, tenantID) {
+		return
+	}
+	executions, err := a.backend.ListExecutionsBySchedule(tenantID, r.PathValue("scheduleID"))
 	if err != nil {
 		writeReadError(w, err)
 		return
@@ -253,12 +346,16 @@ func (a *API) handleListExecutionsByStatus(w http.ResponseWriter, r *http.Reques
 	if !a.requireLeader(w) {
 		return
 	}
+	tenantID := r.PathValue("tenantID")
+	if !a.requireTenantAccess(w, r, tenantID) {
+		return
+	}
 	status := r.URL.Query().Get("status")
 	if status == "" {
 		writeError(w, http.StatusBadRequest, "status query parameter is required")
 		return
 	}
-	executions, err := a.backend.ListExecutionsByStatus(r.PathValue("tenantID"), model.ExecutionStatus(status))
+	executions, err := a.backend.ListExecutionsByStatus(tenantID, model.ExecutionStatus(status))
 	if err != nil {
 		writeReadError(w, err)
 		return
@@ -270,7 +367,11 @@ func (a *API) handleGetExecution(w http.ResponseWriter, r *http.Request) {
 	if !a.requireLeader(w) {
 		return
 	}
-	execution, err := a.backend.GetExecution(r.PathValue("tenantID"), r.PathValue("executionID"))
+	tenantID := r.PathValue("tenantID")
+	if !a.requireTenantAccess(w, r, tenantID) {
+		return
+	}
+	execution, err := a.backend.GetExecution(tenantID, r.PathValue("executionID"))
 	if err != nil {
 		writeReadError(w, err)
 		return
@@ -286,7 +387,11 @@ func (a *API) handleListAttemptsByExecution(w http.ResponseWriter, r *http.Reque
 	if !a.requireLeader(w) {
 		return
 	}
-	attempts, err := a.backend.ListAttemptsByExecution(r.PathValue("tenantID"), r.PathValue("executionID"))
+	tenantID := r.PathValue("tenantID")
+	if !a.requireTenantAccess(w, r, tenantID) {
+		return
+	}
+	attempts, err := a.backend.ListAttemptsByExecution(tenantID, r.PathValue("executionID"))
 	if err != nil {
 		writeReadError(w, err)
 		return
@@ -298,7 +403,11 @@ func (a *API) handleGetAttempt(w http.ResponseWriter, r *http.Request) {
 	if !a.requireLeader(w) {
 		return
 	}
-	attempt, err := a.backend.GetAttempt(r.PathValue("tenantID"), r.PathValue("attemptID"))
+	tenantID := r.PathValue("tenantID")
+	if !a.requireTenantAccess(w, r, tenantID) {
+		return
+	}
+	attempt, err := a.backend.GetAttempt(tenantID, r.PathValue("attemptID"))
 	if err != nil {
 		writeReadError(w, err)
 		return
