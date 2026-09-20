@@ -57,7 +57,7 @@ func getTenant(t *testing.T, sm *StateMachine, id string) *model.Tenant {
 
 func TestApply_ValidCommand_WritesToStorage(t *testing.T) {
 	sm := newTestStateMachine(t)
-	result := sm.Apply(logEntry(t, "create_tenant", command.CreateTenantCommand{ID: "t1", Name: "Acme"}, time.Now()))
+	result := sm.Apply(logEntry(t, "create_tenant", command.CreateTenantCommand{ID: "t1", Name: "Acme", APIKeyHash: "test-hash"}, time.Now()))
 
 	tenant, ok := result.(*model.Tenant)
 	if !ok {
@@ -142,7 +142,7 @@ func (s *fakeSnapshotSink) Close() error  { return nil }
 func TestSnapshotAndRestore_RoundTrip(t *testing.T) {
 	sm := newTestStateMachine(t)
 
-	sm.Apply(logEntry(t, "create_tenant", command.CreateTenantCommand{ID: "t1", Name: "Acme"}, time.Now()))
+	sm.Apply(logEntry(t, "create_tenant", command.CreateTenantCommand{ID: "t1", Name: "Acme", APIKeyHash: "test-hash"}, time.Now()))
 
 	snap, err := sm.Snapshot()
 	if err != nil {
@@ -155,7 +155,7 @@ func TestSnapshotAndRestore_RoundTrip(t *testing.T) {
 	snap.Release()
 
 	// Written after the snapshot was taken — must not survive Restore.
-	sm.Apply(logEntry(t, "create_tenant", command.CreateTenantCommand{ID: "t2", Name: "Should not survive restore"}, time.Now()))
+	sm.Apply(logEntry(t, "create_tenant", command.CreateTenantCommand{ID: "t2", Name: "Should not survive restore", APIKeyHash: "test-hash"}, time.Now()))
 
 	if err := sm.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -170,7 +170,7 @@ func TestSnapshotAndRestore_RoundTrip(t *testing.T) {
 
 	// Prove sm.storage itself was rebuilt around the new db handle, not just
 	// sm.db: a write after Restore must actually persist.
-	sm.Apply(logEntry(t, "create_tenant", command.CreateTenantCommand{ID: "t3", Name: "Post-restore write"}, time.Now()))
+	sm.Apply(logEntry(t, "create_tenant", command.CreateTenantCommand{ID: "t3", Name: "Post-restore write", APIKeyHash: "test-hash"}, time.Now()))
 	if got := getTenant(t, sm, "t3"); got == nil {
 		t.Error("write after Restore did not persist — sm.storage was not rebuilt around the new db handle")
 	}

@@ -10,8 +10,9 @@ import (
 
 func newTestCreateTenantCommand(opts ...func(*CreateTenantCommand)) *CreateTenantCommand {
 	cmd := &CreateTenantCommand{
-		ID:   testTenantID,
-		Name: "Default Tenant",
+		ID:         testTenantID,
+		Name:       "Default Tenant",
+		APIKeyHash: "test-api-key-hash",
 	}
 	for _, o := range opts {
 		o(cmd)
@@ -40,6 +41,9 @@ func TestApplyCreateTenant_HappyPath(t *testing.T) {
 	if !tenant.CreatedAt.Equal(proposedAt) {
 		t.Errorf("CreatedAt: got %v, want %v", tenant.CreatedAt, proposedAt)
 	}
+	if tenant.APIKeyHash != cmd.APIKeyHash {
+		t.Errorf("APIKeyHash: got %q, want %q", tenant.APIKeyHash, cmd.APIKeyHash)
+	}
 
 	stored, ok := tx.tenants[cmd.ID]
 	if !ok {
@@ -47,6 +51,30 @@ func TestApplyCreateTenant_HappyPath(t *testing.T) {
 	}
 	if stored.Name != cmd.Name {
 		t.Errorf("stored.Name: got %q, want %q", stored.Name, cmd.Name)
+	}
+	if stored.APIKeyHash != cmd.APIKeyHash {
+		t.Errorf("stored.APIKeyHash: got %q, want %q", stored.APIKeyHash, cmd.APIKeyHash)
+	}
+}
+
+func TestApplyCreateTenant_MissingAPIKeyHash(t *testing.T) {
+	tx := newFakeTx()
+	cmd := newTestCreateTenantCommand(func(c *CreateTenantCommand) { c.APIKeyHash = "" })
+
+	tenant, err := ApplyCreateTenant(tx, *cmd, time.Time{})
+
+	if tenant != nil {
+		t.Errorf("expected nil tenant on error, got %+v", tenant)
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindValidation {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+	}
+	if cmdErr.Field != "api_key_hash" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "api_key_hash")
 	}
 }
 

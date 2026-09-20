@@ -155,7 +155,7 @@ func TestRaftNode_Propose_AppliesAndIsReadable(t *testing.T) {
 	rn := newTestRaftNode(t, true)
 	waitForLeader(t, rn)
 
-	if _, err := rn.Propose("create_tenant", command.CreateTenantCommand{ID: "t1", Name: "Acme"}, 5*time.Second); err != nil {
+	if _, err := rn.Propose("create_tenant", command.CreateTenantCommand{ID: "t1", Name: "Acme", APIKeyHash: "test-hash"}, 5*time.Second); err != nil {
 		t.Fatalf("Propose: %v", err)
 	}
 	tenant, err := rn.GetTenant("t1")
