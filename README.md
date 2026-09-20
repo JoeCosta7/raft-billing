@@ -13,7 +13,7 @@ It dispatches HTTP callbacks on a schedule (one-time or recurring: interval, dai
 ```sh
 go build -o scheduler ./cmd/scheduler
 
-./scheduler \
+SCHEDULER_ADMIN_KEY=change-me ./scheduler \
   --node-id=node1 \
   --raft-addr=127.0.0.1:7001 \
   --http-addr=127.0.0.1:8001 \
@@ -24,26 +24,39 @@ go build -o scheduler ./cmd/scheduler
 
 `--bootstrap` initializes a brand-new cluster and should only be passed on the first node the first time it starts. `--peers` is a comma-separated `node-id=raft-addr` list of every voting member (raft addresses, not HTTP addresses).
 
+`SCHEDULER_ADMIN_KEY` is required on every node and must be identical across the cluster — it's the admin credential (see [Authentication](#authentication) below). It's an env var rather than a flag deliberately, since flags are visible in a process listing.
+
 ## Running a 3-node cluster
 
 Start three nodes with the same `--peers` list, one `--bootstrap`ed:
 
 ```sh
-./scheduler --node-id=node1 --raft-addr=127.0.0.1:7001 --http-addr=127.0.0.1:8001 \
+SCHEDULER_ADMIN_KEY=change-me ./scheduler --node-id=node1 --raft-addr=127.0.0.1:7001 --http-addr=127.0.0.1:8001 \
   --data-dir=/tmp/scheduler-node1 \
   --peers=node1=127.0.0.1:7001,node2=127.0.0.1:7002,node3=127.0.0.1:7003 \
   --bootstrap
 
-./scheduler --node-id=node2 --raft-addr=127.0.0.1:7002 --http-addr=127.0.0.1:8002 \
+SCHEDULER_ADMIN_KEY=change-me ./scheduler --node-id=node2 --raft-addr=127.0.0.1:7002 --http-addr=127.0.0.1:8002 \
   --data-dir=/tmp/scheduler-node2 \
   --peers=node1=127.0.0.1:7001,node2=127.0.0.1:7002,node3=127.0.0.1:7003
 
-./scheduler --node-id=node3 --raft-addr=127.0.0.1:7003 --http-addr=127.0.0.1:8003 \
+SCHEDULER_ADMIN_KEY=change-me ./scheduler --node-id=node3 --raft-addr=127.0.0.1:7003 --http-addr=127.0.0.1:8003 \
   --data-dir=/tmp/scheduler-node3 \
   --peers=node1=127.0.0.1:7001,node2=127.0.0.1:7002,node3=127.0.0.1:7003
 ```
 
+All nodes must be started with the same `SCHEDULER_ADMIN_KEY` — it's not itself replicated through Raft, so a mismatched value on one node just means that node's admin endpoints reject an otherwise-valid admin key.
+
 Only the leader serves API requests. A non-leader node responds `503` 
+
+## Authentication
+
+Every request needs an `Authorization: Bearer <token>` header. Two kinds of credential exist:
+
+- **Admin key** (`SCHEDULER_ADMIN_KEY`) — authorizes the two inherently cross-tenant endpoints, `POST /tenants` and `GET /tenants`, and can also act on any single tenant's endpoints.
+- **Tenant API key** — scoped to one tenant. `POST /tenants` returns a freshly generated key in the response body's `api_key` field; that's the only time it's ever shown, since only its SHA-256 hash is persisted. A tenant's key only ever authorizes that tenant's own `/tenants/{tenantID}/...` resources, never another tenant's, even against a path that names one.
+
+There's no built-in TLS termination — this assumes the service runs behind a TLS-terminating proxy or load balancer, so a bearer token is never sent over a plaintext connection in practice.
 
 ## API
 
@@ -64,14 +77,20 @@ Only the leader serves API requests. A non-leader node responds `503`
 | `GET` | `/tenants/{tenantID}/executions/{executionID}/attempts` | List attempts for an execution |
 | `GET` | `/tenants/{tenantID}/attempts/{attemptID}` | Get an attempt |
 
-Error responses are `{"error": "..."}` with a status mapped from the rejection kind: `400` validation, `404` not found, `409` conflict, `503` not leader / unreachable, `500` storage.
+Error responses are `{"error": "..."}` with a status mapped from the rejection kind: `400` validation, `401` missing/invalid credentials, `404` not found, `409` conflict, `503` not leader / unreachable, `500` storage.
 
 ### Example: create a recurring schedule
 
 ```sh
-curl -X POST http://127.0.0.1:8001/tenants -d '{"id":"example","name":"Fake Corp"}'
+curl -X POST http://127.0.0.1:8001/tenants \
+  -H "Authorization: Bearer change-me" \
+  -d '{"id":"example","name":"Fake Corp"}'
+# => {"id":"example","name":"Fake Corp","created_at":"...","api_key":"sched_..."}
+# save that api_key now — it's never shown again
 
-curl -X POST http://127.0.0.1:8001/tenants/example/schedules -d '{
+curl -X POST http://127.0.0.1:8001/tenants/example/schedules \
+  -H "Authorization: Bearer sched_..." \
+  -d '{
   "id": "daily-report",
   "callback_url": "https://example.com/webhook",
   "payload": {"report": "daily"},
