@@ -135,6 +135,7 @@ func TestNode_SingleNodeBootstrap_HTTPCreatesAndDispatchesSchedule(t *testing.T)
 	const nodeID = "node1"
 	raftAddr := freeAddr(t)
 	httpAddr := freeAddr(t)
+	const adminKey = "test-admin-key"
 	cfg := &config.Config{
 		NodeID:    nodeID,
 		RaftAddr:  raftAddr,
@@ -142,6 +143,7 @@ func TestNode_SingleNodeBootstrap_HTTPCreatesAndDispatchesSchedule(t *testing.T)
 		DataDir:   t.TempDir(),
 		Peers:     map[string]string{nodeID: raftAddr},
 		Bootstrap: true,
+		AdminKey:  adminKey,
 	}
 
 	n, err := New(cfg)
@@ -165,10 +167,20 @@ func TestNode_SingleNodeBootstrap_HTTPCreatesAndDispatchesSchedule(t *testing.T)
 	waitForLeader(t, n)
 	base := "http://" + httpAddr
 
-	httpJSON(t, http.MethodPost, base+"/tenants", command.CreateTenantCommand{
+	createTenantResp := httpJSON(t, http.MethodPost, base+"/tenants", command.CreateTenantCommand{
 		ID:   "tenant-1",
 		Name: "Test Tenant",
-	}, http.StatusCreated)
+	}, adminKey, http.StatusCreated)
+	var createdTenant struct {
+		APIKey string `json:"api_key"`
+	}
+	if err := json.Unmarshal(createTenantResp, &createdTenant); err != nil {
+		t.Fatalf("decode create_tenant response: %v", err)
+	}
+	if createdTenant.APIKey == "" {
+		t.Fatal("create_tenant response did not include an api_key")
+	}
+	tenantKey := createdTenant.APIKey
 
 	createSchedule := command.CreateScheduleCommand{
 		ID:           "sched-1",
@@ -181,10 +193,11 @@ func TestNode_SingleNodeBootstrap_HTTPCreatesAndDispatchesSchedule(t *testing.T)
 		MaxAttempts:  3,
 		RetryBackoff: model.RetryBackoff{Initial: 100 * time.Millisecond, Multiplier: 2},
 	}
-	httpJSON(t, http.MethodPost, base+"/tenants/tenant-1/schedules", createSchedule, http.StatusCreated)
+	httpJSON(t, http.MethodPost, base+"/tenants/tenant-1/schedules", createSchedule, tenantKey, http.StatusCreated)
 
-	// Confirm the read path too, not just the write.
-	getResp := httpJSON(t, http.MethodGet, base+"/tenants/tenant-1/schedules/sched-1", nil, http.StatusOK)
+	// Confirm the read path too, not just the write — and confirm the
+	// tenant's own key (not the admin key) is what authorizes it.
+	getResp := httpJSON(t, http.MethodGet, base+"/tenants/tenant-1/schedules/sched-1", nil, tenantKey, http.StatusOK)
 	var got model.Schedule
 	if err := json.Unmarshal(getResp, &got); err != nil {
 		t.Fatalf("decode GET schedule response: %v", err)
@@ -202,9 +215,10 @@ func TestNode_SingleNodeBootstrap_HTTPCreatesAndDispatchesSchedule(t *testing.T)
 	}
 }
 
-// httpJSON does a JSON request against the real HTTP server, fails the test
-// if the status code doesn't match wantStatus, and returns the response body.
-func httpJSON(t *testing.T, method, url string, body any, wantStatus int) []byte {
+// httpJSON does a JSON request against the real HTTP server, optionally
+// with a bearer token (pass "" for none), fails the test if the status code
+// doesn't match wantStatus, and returns the response body.
+func httpJSON(t *testing.T, method, url string, body any, token string, wantStatus int) []byte {
 	t.Helper()
 	var reqBody *bytes.Reader
 	if body != nil {
@@ -219,6 +233,9 @@ func httpJSON(t *testing.T, method, url string, body any, wantStatus int) []byte
 	req, err := http.NewRequest(method, url, reqBody)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
