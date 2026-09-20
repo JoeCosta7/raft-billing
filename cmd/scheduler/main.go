@@ -32,7 +32,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Printf("config: %+v\n", cfg)
+	fmt.Printf("config: node-id=%s raft-addr=%s http-addr=%s data-dir=%s bootstrap=%v peers=%v\n",
+		cfg.NodeID, cfg.RaftAddr, cfg.HTTPAddr, cfg.DataDir, cfg.Bootstrap, cfg.Peers)
 	//builds node from config
 	n, err := node.New(cfg)
 	if err != nil {
