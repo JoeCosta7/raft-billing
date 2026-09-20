@@ -714,8 +714,6 @@ func (w *Worker) runTick(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		//Schedule-scan
-		//TODO Implement ListSchedulesDue
 		schedules, err := w.reader.ListSchedulesDue(tenant.ID)
 		if err != nil {
 			w.logger.Warn("schedule scan failed", "tenant", tenant.ID, "err", err)
