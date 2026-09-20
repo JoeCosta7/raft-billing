@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -14,9 +15,19 @@ type Config struct {
 	DataDir   string
 	Peers     map[string]string
 	Bootstrap bool
+	// AdminKey authorizes the two inherently cross-tenant HTTP endpoints
+	// (create a tenant, list all tenants) — read from an environment
+	// variable rather than a CLI flag, deliberately unlike every other
+	// field here: it's a secret, and flags are visible via process listing
+	// on most systems in a way environment variables at least aren't by
+	// default. Every node in a cluster must be configured with the same
+	// value.
+	AdminKey string
 
 	peersRaw string
 }
+
+const adminKeyEnvVar = "SCHEDULER_ADMIN_KEY"
 
 func New(args []string) (*Config, error) {
 	cfg := &Config{}
@@ -30,6 +41,7 @@ func New(args []string) (*Config, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
+	cfg.AdminKey = os.Getenv(adminKeyEnvVar)
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -48,6 +60,9 @@ func (cfg *Config) validate() error {
 	}
 	if cfg.DataDir == "" {
 		return fmt.Errorf("data-dir is required")
+	}
+	if cfg.AdminKey == "" {
+		return fmt.Errorf("%s environment variable is required", adminKeyEnvVar)
 	}
 	if err := cfg.parsePeers(); err != nil {
 		return err

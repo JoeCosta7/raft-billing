@@ -27,15 +27,19 @@ func withoutFlag(args []string, prefix string) []string {
 
 func TestNew(t *testing.T) {
 	cases := []struct {
-		name    string
-		args    []string
-		wantErr string // substring expected in error; empty means no error
-		check   func(t *testing.T, cfg *Config)
+		name       string
+		args       []string
+		noAdminKey bool   // if true, leave SCHEDULER_ADMIN_KEY unset instead of the default test value
+		wantErr    string // substring expected in error; empty means no error
+		check      func(t *testing.T, cfg *Config)
 	}{
 		{
 			name: "happy path",
 			args: baseArgs(),
 			check: func(t *testing.T, cfg *Config) {
+				if cfg.AdminKey != "test-admin-key" {
+					t.Errorf("AdminKey = %q, want %q", cfg.AdminKey, "test-admin-key")
+				}
 				if cfg.NodeID != "n1" {
 					t.Errorf("NodeID = %q, want %q", cfg.NodeID, "n1")
 				}
@@ -128,10 +132,21 @@ func TestNew(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:       "missing admin key",
+			args:       baseArgs(),
+			noAdminKey: true,
+			wantErr:    adminKeyEnvVar + " environment variable is required",
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.noAdminKey {
+				t.Setenv(adminKeyEnvVar, "")
+			} else {
+				t.Setenv(adminKeyEnvVar, "test-admin-key")
+			}
 			cfg, err := New(tc.args)
 
 			if tc.wantErr == "" {
