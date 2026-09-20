@@ -79,11 +79,16 @@ func TestNode_SingleNodeBootstrap_DispatchesRealSchedule(t *testing.T) {
 
 	waitForLeader(t, n)
 
-	if _, err := n.raftNode.Propose("create_tenant", command.CreateTenantCommand{
-		ID:   "tenant-1",
-		Name: "Test Tenant",
-	}, 5*time.Second); err != nil {
+	result, err := n.raftNode.Propose("create_tenant", command.CreateTenantCommand{
+		ID:         "tenant-1",
+		Name:       "Test Tenant",
+		APIKeyHash: "test-hash",
+	}, 5*time.Second)
+	if err != nil {
 		t.Fatalf("propose create_tenant: %v", err)
+	}
+	if cmdErr, ok := result.(*command.CommandError); ok {
+		t.Fatalf("create_tenant rejected: %v", cmdErr)
 	}
 
 	createSchedule := command.CreateScheduleCommand{

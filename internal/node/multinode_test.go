@@ -131,8 +131,12 @@ func TestCluster_WriteReplicatesToAllNodes(t *testing.T) {
 	c := newTestCluster(t, 3)
 	leader := waitForClusterLeader(t, c.nodes)
 
-	if _, err := leader.raftNode.Propose("create_tenant", command.CreateTenantCommand{ID: "t1", Name: "Acme"}, 5*time.Second); err != nil {
+	result, err := leader.raftNode.Propose("create_tenant", command.CreateTenantCommand{ID: "t1", Name: "Acme", APIKeyHash: "test-hash"}, 5*time.Second)
+	if err != nil {
 		t.Fatalf("Propose: %v", err)
+	}
+	if cmdErr, ok := result.(*command.CommandError); ok {
+		t.Fatalf("create_tenant rejected: %v", cmdErr)
 	}
 
 	for _, n := range c.nodes {
@@ -177,8 +181,12 @@ func TestCluster_LeaderFailover_NewLeaderElectedAndServesWrites(t *testing.T) {
 		t.Fatalf("expected a different node to take over, got the same ID %q", oldLeaderID)
 	}
 
-	if _, err := newLeader.raftNode.Propose("create_tenant", command.CreateTenantCommand{ID: "t2", Name: "Post-failover"}, 5*time.Second); err != nil {
+	result, err := newLeader.raftNode.Propose("create_tenant", command.CreateTenantCommand{ID: "t2", Name: "Post-failover", APIKeyHash: "test-hash"}, 5*time.Second)
+	if err != nil {
 		t.Fatalf("Propose after failover: %v", err)
+	}
+	if cmdErr, ok := result.(*command.CommandError); ok {
+		t.Fatalf("create_tenant rejected: %v", cmdErr)
 	}
 	tenant, err := newLeader.raftNode.GetTenant("t2")
 	if err != nil {
@@ -210,8 +218,12 @@ func TestCluster_Failover_RecoversOrphanedInFlightExecution(t *testing.T) {
 	c := newTestCluster(t, 3)
 	leader1 := waitForClusterLeader(t, c.nodes)
 
-	if _, err := leader1.raftNode.Propose("create_tenant", command.CreateTenantCommand{ID: "t1", Name: "Acme"}, 5*time.Second); err != nil {
+	result, err := leader1.raftNode.Propose("create_tenant", command.CreateTenantCommand{ID: "t1", Name: "Acme", APIKeyHash: "test-hash"}, 5*time.Second)
+	if err != nil {
 		t.Fatalf("propose create_tenant: %v", err)
+	}
+	if cmdErr, ok := result.(*command.CommandError); ok {
+		t.Fatalf("create_tenant rejected: %v", cmdErr)
 	}
 	createSchedule := command.CreateScheduleCommand{
 		ID:           "s1",

@@ -120,8 +120,17 @@ func TestCluster_NewLeaderReadsNeverStaleAfterFailover(t *testing.T) {
 			var lastID string
 			for i := range 20 {
 				lastID = fmt.Sprintf("t%d", i)
-				if _, err := leader.Propose("create_tenant", command.CreateTenantCommand{ID: lastID, Name: "x"}, 5*time.Second); err != nil {
+				result, err := leader.Propose("create_tenant", command.CreateTenantCommand{ID: lastID, Name: "x", APIKeyHash: "test-hash"}, 5*time.Second)
+				if err != nil {
 					t.Fatalf("Propose: %v", err)
+				}
+				// Propose's error return is transport/commit-level only — a
+				// command the FSM rejected still commits cleanly and comes
+				// back as a *command.CommandError result instead. Checking
+				// only err here previously let every create_tenant in this
+				// test silently no-op once api_key_hash became required.
+				if cmdErr, ok := result.(*command.CommandError); ok {
+					t.Fatalf("create_tenant rejected: %v", cmdErr)
 				}
 			}
 
