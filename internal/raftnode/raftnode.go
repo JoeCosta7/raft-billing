@@ -203,6 +203,31 @@ func (rn *RaftNode) ListTenants() ([]*model.Tenant, error) {
 	return tenants, nil
 }
 
+// ListTenantsPage is the paginated counterpart of ListTenants, used only by
+// the HTTP API
+func (rn *RaftNode) ListTenantsPage(limit int, cursor string) ([]*model.Tenant, string, error) {
+	if rn.raft.State() != raft.Leader {
+		return nil, "", fmt.Errorf("failed to ListTenantsPage on node %v", string(rn.raft.Leader()))
+	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, "", err
+	}
+	var tenants []*model.Tenant
+	var nextCursor string
+	err := rn.storage.View(func(tx storage.Tx) error {
+		ts, nc, err := tx.ListTenantsPage(limit, cursor)
+		if err != nil {
+			return err
+		}
+		tenants, nextCursor = ts, nc
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return tenants, nextCursor, nil
+}
+
 func (rn *RaftNode) GetExecution(tenantID, id string) (*model.Execution, error) {
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("failed to GetExecution on node %v", string(rn.raft.Leader()))
@@ -271,6 +296,31 @@ func (rn *RaftNode) ListExecutionsBySchedule(tenantID, scheduleID string) ([]*mo
 	return executions, nil
 }
 
+// ListExecutionsBySchedulePage is the paginated counterpart of
+// ListExecutionsBySchedule, used only by the HTTP API.
+func (rn *RaftNode) ListExecutionsBySchedulePage(tenantID, scheduleID string, limit int, cursor string) ([]*model.Execution, string, error) {
+	if rn.raft.State() != raft.Leader {
+		return nil, "", fmt.Errorf("failed to ListExecutionsBySchedulePage on node %v", string(rn.raft.Leader()))
+	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, "", err
+	}
+	var executions []*model.Execution
+	var nextCursor string
+	err := rn.storage.View(func(tx storage.Tx) error {
+		ex, nc, err := tx.ListExecutionsBySchedulePage(tenantID, scheduleID, limit, cursor)
+		if err != nil {
+			return err
+		}
+		executions, nextCursor = ex, nc
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return executions, nextCursor, nil
+}
+
 func (rn *RaftNode) ListExecutionsByStatus(tenantID string, status model.ExecutionStatus) ([]*model.Execution, error) {
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("failed to ListExecutionsByStatus on node %v", string(rn.raft.Leader()))
@@ -295,6 +345,31 @@ func (rn *RaftNode) ListExecutionsByStatus(tenantID string, status model.Executi
 	return executions, nil
 }
 
+// ListExecutionsByStatusPage is the paginated counterpart of
+// ListExecutionsByStatus, used only by the HTTP API.
+func (rn *RaftNode) ListExecutionsByStatusPage(tenantID string, status model.ExecutionStatus, limit int, cursor string) ([]*model.Execution, string, error) {
+	if rn.raft.State() != raft.Leader {
+		return nil, "", fmt.Errorf("failed to ListExecutionsByStatusPage on node %v", string(rn.raft.Leader()))
+	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, "", err
+	}
+	var executions []*model.Execution
+	var nextCursor string
+	err := rn.storage.View(func(tx storage.Tx) error {
+		ex, nc, err := tx.ListExecutionsByStatusPage(tenantID, status, limit, cursor)
+		if err != nil {
+			return err
+		}
+		executions, nextCursor = ex, nc
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return executions, nextCursor, nil
+}
+
 func (rn *RaftNode) ListAttemptsByExecution(tenantID, executionID string) ([]*model.Attempt, error) {
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("failed to ListAttemptsByExecution on node %v", string(rn.raft.Leader()))
@@ -317,6 +392,31 @@ func (rn *RaftNode) ListAttemptsByExecution(tenantID, executionID string) ([]*mo
 		return nil, err
 	}
 	return attempts, nil
+}
+
+// ListAttemptsByExecutionPage is the paginated counterpart of
+// ListAttemptsByExecution, used only by the HTTP API.
+func (rn *RaftNode) ListAttemptsByExecutionPage(tenantID, executionID string, limit int, cursor string) ([]*model.Attempt, string, error) {
+	if rn.raft.State() != raft.Leader {
+		return nil, "", fmt.Errorf("failed to ListAttemptsByExecutionPage on node %v", string(rn.raft.Leader()))
+	}
+	if err := rn.ensureCaughtUpAsLeader(); err != nil {
+		return nil, "", err
+	}
+	var attempts []*model.Attempt
+	var nextCursor string
+	err := rn.storage.View(func(tx storage.Tx) error {
+		at, nc, err := tx.ListAttemptsByExecutionPage(tenantID, executionID, limit, cursor)
+		if err != nil {
+			return err
+		}
+		attempts, nextCursor = at, nc
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return attempts, nextCursor, nil
 }
 
 func (rn *RaftNode) Propose(cmdType string, cmd any, timeout time.Duration) (any, error) {

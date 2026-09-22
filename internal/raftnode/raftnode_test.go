@@ -121,8 +121,58 @@ func TestRaftNode_NeverBootstrapped_NonLeaderReadsAllError(t *testing.T) {
 	if _, err := rn.ListAttemptsByExecution("t1", "e1"); err == nil {
 		t.Error("ListAttemptsByExecution: expected an error when not leader, got nil")
 	}
+	if _, _, err := rn.ListTenantsPage(50, ""); err == nil {
+		t.Error("ListTenantsPage: expected an error when not leader, got nil")
+	}
+	if _, _, err := rn.ListExecutionsBySchedulePage("t1", "s1", 50, ""); err == nil {
+		t.Error("ListExecutionsBySchedulePage: expected an error when not leader, got nil")
+	}
+	if _, _, err := rn.ListExecutionsByStatusPage("t1", model.ExecutionStatusInFlight, 50, ""); err == nil {
+		t.Error("ListExecutionsByStatusPage: expected an error when not leader, got nil")
+	}
+	if _, _, err := rn.ListAttemptsByExecutionPage("t1", "e1", 50, ""); err == nil {
+		t.Error("ListAttemptsByExecutionPage: expected an error when not leader, got nil")
+	}
 	if _, err := rn.Propose("create_tenant", command.CreateTenantCommand{ID: "t1"}, time.Second); err == nil {
 		t.Error("Propose: expected an error when not leader, got nil")
+	}
+}
+
+// TestRaftNode_ListTenantsPage_ThreadsLimitAndCursor is a smoke test for the
+// paginated wrapper -- the real cursor-walk logic is covered exhaustively at
+// the storage layer, this just confirms RaftNode threads limit/cursor/
+// nextCursor through storage.View correctly and still enforces the leader
+// gate the unpaginated methods use.
+func TestRaftNode_ListTenantsPage_ThreadsLimitAndCursor(t *testing.T) {
+	rn := newTestRaftNode(t, true)
+	waitForLeader(t, rn)
+
+	for _, id := range []string{"t1", "t2", "t3"} {
+		if _, err := rn.Propose("create_tenant", command.CreateTenantCommand{ID: id, Name: id, APIKeyHash: "test-hash"}, 5*time.Second); err != nil {
+			t.Fatalf("Propose(%s): %v", id, err)
+		}
+	}
+
+	page, cursor, err := rn.ListTenantsPage(2, "")
+	if err != nil {
+		t.Fatalf("ListTenantsPage page 1: %v", err)
+	}
+	if len(page) != 2 {
+		t.Fatalf("page 1: got %d tenants, want 2", len(page))
+	}
+	if cursor == "" {
+		t.Fatal("page 1: expected a non-empty nextCursor, a third tenant remains")
+	}
+
+	page2, cursor2, err := rn.ListTenantsPage(2, cursor)
+	if err != nil {
+		t.Fatalf("ListTenantsPage page 2: %v", err)
+	}
+	if len(page2) != 1 {
+		t.Fatalf("page 2: got %d tenants, want 1", len(page2))
+	}
+	if cursor2 != "" {
+		t.Errorf("page 2 nextCursor: got %q, want empty", cursor2)
 	}
 }
 
