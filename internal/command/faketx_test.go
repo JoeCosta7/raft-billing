@@ -160,6 +160,75 @@ func (f *fakeTx) ListSchedulesDue(tenantID string, now time.Time, fn func(*model
 	return nil
 }
 
+// paginate slices a sorted-by-ID slice starting just past cursor (the last
+// ID returned by the previous page), up to limit items, reporting the last
+// item's ID as nextCursor when more remain. Shared by the four Page methods
+// below -- this fake is map-backed, not bbolt, so it has no cursor/Seek to
+// reuse like the real storage.Tx implementation does.
+func paginate[T any](items []T, limit int, cursor string, idOf func(T) string) ([]T, string) {
+	if limit <= 0 {
+		return nil, ""
+	}
+	start := 0
+	if cursor != "" {
+		start = sort.Search(len(items), func(i int) bool { return idOf(items[i]) > cursor })
+	}
+	if start >= len(items) {
+		return nil, ""
+	}
+	end := start + limit
+	if end >= len(items) {
+		return items[start:], ""
+	}
+	return items[start:end], idOf(items[end-1])
+}
+
+func (f *fakeTx) ListTenantsPage(limit int, cursor string) ([]*model.Tenant, string, error) {
+	var tenants []*model.Tenant
+	for _, t := range f.tenants {
+		tenants = append(tenants, t)
+	}
+	sort.Slice(tenants, func(i, j int) bool { return tenants[i].ID < tenants[j].ID })
+	page, nextCursor := paginate(tenants, limit, cursor, func(t *model.Tenant) string { return t.ID })
+	return page, nextCursor, nil
+}
+
+func (f *fakeTx) ListExecutionsBySchedulePage(tenantID, scheduleID string, limit int, cursor string) ([]*model.Execution, string, error) {
+	var matches []*model.Execution
+	for _, ex := range f.executions {
+		if ex.TenantID == tenantID && ex.ScheduleID == scheduleID {
+			matches = append(matches, ex)
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+	page, nextCursor := paginate(matches, limit, cursor, func(ex *model.Execution) string { return ex.ID })
+	return page, nextCursor, nil
+}
+
+func (f *fakeTx) ListExecutionsByStatusPage(tenantID string, status model.ExecutionStatus, limit int, cursor string) ([]*model.Execution, string, error) {
+	var matches []*model.Execution
+	for _, ex := range f.executions {
+		if ex.TenantID == tenantID && ex.Status == status {
+			matches = append(matches, ex)
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+	page, nextCursor := paginate(matches, limit, cursor, func(ex *model.Execution) string { return ex.ID })
+	return page, nextCursor, nil
+}
+
+func (f *fakeTx) ListAttemptsByExecutionPage(tenantID, executionID string, limit int, cursor string) ([]*model.Attempt, string, error) {
+	var matches []*model.Attempt
+	for _, at := range f.attempts {
+		if at.TenantID == tenantID && at.ExecutionID == executionID {
+			matches = append(matches, at)
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+	page, nextCursor := paginate(matches, limit, cursor, func(at *model.Attempt) string { return at.ID })
+	return page, nextCursor, nil
+}
+
 func newTestSchedule(overrides ...func(*model.Schedule)) *model.Schedule {
 	dayOfMonth := 15
 	sch := &model.Schedule{

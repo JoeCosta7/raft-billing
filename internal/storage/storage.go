@@ -37,6 +37,16 @@ type Tx interface {
 	ListExecutionsByStatus(tenantID string, status model.ExecutionStatus, fn func(*model.Execution) error) error
 	ListAttemptsByExecution(tenantID, executionID string, fn func(*model.Attempt) error) error
 	ListSchedulesDue(tenantID string, now time.Time, fn func(*model.Schedule) error) error
+
+	// The Page-suffixed methods below are the paginated counterparts of the
+	// unpaginated ones above, used only by the HTTP API. The unpaginated
+	// ones stay as-is because internal/scheduler's recovery/tick loop needs
+	// the complete result set every call -- paginating those would silently
+	// make crash recovery miss orphaned executions past page one.
+	ListTenantsPage(limit int, cursor string) (tenants []*model.Tenant, nextCursor string, err error)
+	ListExecutionsBySchedulePage(tenantID, scheduleID string, limit int, cursor string) (executions []*model.Execution, nextCursor string, err error)
+	ListExecutionsByStatusPage(tenantID string, status model.ExecutionStatus, limit int, cursor string) (executions []*model.Execution, nextCursor string, err error)
+	ListAttemptsByExecutionPage(tenantID, executionID string, limit int, cursor string) (attempts []*model.Attempt, nextCursor string, err error)
 }
 
 const (
@@ -302,6 +312,42 @@ func (t *boltTx) ListTenants() ([]*model.Tenant, error) {
 	return tenants, nil
 }
 
+// ListTenantsPage walks bucketTenants (keyed directly by tenant ID, no
+// prefix) in cursor order, which is the same byte-sorted order ListTenants'
+// ForEach already produces -- pagination doesn't change ordering, just
+// exposes it explicitly. See the "peek +1" note on ListExecutionsByStatusPage
+// for how nextCursor is determined.
+func (t *boltTx) ListTenantsPage(limit int, cursor string) ([]*model.Tenant, string, error) {
+	if limit <= 0 {
+		return nil, "", nil
+	}
+	b := t.tx.Bucket([]byte(bucketTenants))
+	c := b.Cursor()
+	var k, v []byte
+	if cursor == "" {
+		k, v = c.First()
+	} else {
+		k, v = c.Seek([]byte(cursor))
+		if k != nil && string(k) == cursor {
+			k, v = c.Next()
+		}
+	}
+	var tenants []*model.Tenant
+	var nextCursor string
+	for ; k != nil; k, v = c.Next() {
+		if len(tenants) == limit {
+			nextCursor = tenants[len(tenants)-1].ID
+			break
+		}
+		var tenant model.Tenant
+		if err := json.Unmarshal(v, &tenant); err != nil {
+			return nil, "", err
+		}
+		tenants = append(tenants, &tenant)
+	}
+	return tenants, nextCursor, nil
+}
+
 func (t *boltTx) ListExecutionsBySchedule(tenantID, scheduleID string, fn func(*model.Execution) error) error {
 	b := t.tx.Bucket([]byte(bucketExecutionsBySchedule))
 	c := b.Cursor()
@@ -322,6 +368,44 @@ func (t *boltTx) ListExecutionsBySchedule(tenantID, scheduleID string, fn func(*
 	return nil
 }
 
+// ListExecutionsBySchedulePage is the paginated counterpart of
+// ListExecutionsBySchedule -- see ListExecutionsByStatusPage below for the
+// cursor/peek-+1 pattern shared by all three prefix-scan Page methods.
+func (t *boltTx) ListExecutionsBySchedulePage(tenantID, scheduleID string, limit int, cursor string) ([]*model.Execution, string, error) {
+	if limit <= 0 {
+		return nil, "", nil
+	}
+	b := t.tx.Bucket([]byte(bucketExecutionsBySchedule))
+	c := b.Cursor()
+	prefix := []byte(tenantID + ":" + scheduleID + ":")
+	startKey := prefix
+	if cursor != "" {
+		startKey = executionByScheduleKey(tenantID, scheduleID, cursor)
+	}
+	k, _ := c.Seek(startKey)
+	if cursor != "" && k != nil && bytes.Equal(k, startKey) {
+		k, _ = c.Next()
+	}
+	var executions []*model.Execution
+	var nextCursor string
+	for ; k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+		if len(executions) == limit {
+			nextCursor = executions[len(executions)-1].ID
+			break
+		}
+		execID := string(bytes.TrimPrefix(k, prefix))
+		exec, err := t.GetExecution(tenantID, execID)
+		if err != nil {
+			return nil, "", err
+		}
+		if exec == nil {
+			return nil, "", fmt.Errorf("index entry references missing execution: tenant=%s exec_id=%s", tenantID, execID)
+		}
+		executions = append(executions, exec)
+	}
+	return executions, nextCursor, nil
+}
+
 func (t *boltTx) ListExecutionsByStatus(tenantID string, status model.ExecutionStatus, fn func(*model.Execution) error) error {
 	b := t.tx.Bucket([]byte(bucketExecutionsByStatus))
 	c := b.Cursor()
@@ -340,6 +424,50 @@ func (t *boltTx) ListExecutionsByStatus(tenantID string, status model.ExecutionS
 		}
 	}
 	return nil
+}
+
+// ListExecutionsByStatusPage is the paginated counterpart of
+// ListExecutionsByStatus. Seeks to prefix+cursor instead of the bare prefix
+// when resuming (Seek lands on the cursor's own key if it still exists in
+// this status's index -- skip it; if it no longer exists because the
+// execution's status changed between pages, Seek already lands on the next
+// key >= it, which is exactly the right resume point). Collects up to
+// limit items; if a (limit+1)th matching key exists, that proves there's a
+// next page, so nextCursor is set to the limit-th item's ID without
+// consuming the peeked item.
+func (t *boltTx) ListExecutionsByStatusPage(tenantID string, status model.ExecutionStatus, limit int, cursor string) ([]*model.Execution, string, error) {
+	if limit <= 0 {
+		return nil, "", nil
+	}
+	b := t.tx.Bucket([]byte(bucketExecutionsByStatus))
+	c := b.Cursor()
+	prefix := []byte(tenantID + ":" + string(status) + ":")
+	startKey := prefix
+	if cursor != "" {
+		startKey = executionByStatusKey(tenantID, string(status), cursor)
+	}
+	k, _ := c.Seek(startKey)
+	if cursor != "" && k != nil && bytes.Equal(k, startKey) {
+		k, _ = c.Next()
+	}
+	var executions []*model.Execution
+	var nextCursor string
+	for ; k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+		if len(executions) == limit {
+			nextCursor = executions[len(executions)-1].ID
+			break
+		}
+		execID := string(bytes.TrimPrefix(k, prefix))
+		exec, err := t.GetExecution(tenantID, execID)
+		if err != nil {
+			return nil, "", err
+		}
+		if exec == nil {
+			return nil, "", fmt.Errorf("index entry references missing execution: tenant=%s exec_id=%s", tenantID, execID)
+		}
+		executions = append(executions, exec)
+	}
+	return executions, nextCursor, nil
 }
 
 func (t *boltTx) ListSchedulesDue(tenantID string, now time.Time, fn func(*model.Schedule) error) error {
@@ -383,6 +511,44 @@ func (t *boltTx) ListAttemptsByExecution(tenantID, executionID string, fn func(*
 		}
 	}
 	return nil
+}
+
+// ListAttemptsByExecutionPage is the paginated counterpart of
+// ListAttemptsByExecution -- see ListExecutionsByStatusPage for the
+// cursor/peek-+1 pattern shared by all three prefix-scan Page methods.
+func (t *boltTx) ListAttemptsByExecutionPage(tenantID, executionID string, limit int, cursor string) ([]*model.Attempt, string, error) {
+	if limit <= 0 {
+		return nil, "", nil
+	}
+	b := t.tx.Bucket([]byte(bucketAttemptsByExecution))
+	c := b.Cursor()
+	prefix := []byte(tenantID + ":" + executionID + ":")
+	startKey := prefix
+	if cursor != "" {
+		startKey = attemptsByExecutionKey(tenantID, executionID, cursor)
+	}
+	k, _ := c.Seek(startKey)
+	if cursor != "" && k != nil && bytes.Equal(k, startKey) {
+		k, _ = c.Next()
+	}
+	var attempts []*model.Attempt
+	var nextCursor string
+	for ; k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+		if len(attempts) == limit {
+			nextCursor = attempts[len(attempts)-1].ID
+			break
+		}
+		attemptID := string(bytes.TrimPrefix(k, prefix))
+		attempt, err := t.GetAttempt(tenantID, attemptID)
+		if err != nil {
+			return nil, "", err
+		}
+		if attempt == nil {
+			return nil, "", fmt.Errorf("index entry references missing attempt: tenant=%s attempt_id=%s", tenantID, attemptID)
+		}
+		attempts = append(attempts, attempt)
+	}
+	return attempts, nextCursor, nil
 }
 
 //User facing

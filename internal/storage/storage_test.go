@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"fmt"
 	"raft-biling/internal/model"
 	"reflect"
 	"slices"
@@ -470,5 +471,246 @@ func TestStorage_ListAttemptsByExecution_HappyPath(t *testing.T) {
 
 	if !slices.Equal(ids, expected) {
 		t.Fatalf("ids mismatch:\ngot:  %+v\nwant: %+v", ids, expected)
+	}
+}
+
+func TestStorage_ListExecutionsByStatusPage_WalksAllPages(t *testing.T) {
+	s := newTestStorage(t)
+	want := []string{"exec_p_00", "exec_p_01", "exec_p_02", "exec_p_03", "exec_p_04"}
+	if err := s.Update(func(tx Tx) error {
+		for _, id := range want {
+			ex := newTestExecution(func(e *model.Execution) { e.ID = id; e.Status = model.ExecutionStatusPending })
+			if err := tx.PutExecution(ex); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	var got []string
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > 10 {
+			t.Fatal("pagination did not terminate")
+		}
+		var page []*model.Execution
+		var nextCursor string
+		if err := s.View(func(tx Tx) error {
+			p, nc, err := tx.ListExecutionsByStatusPage(testTenantID, model.ExecutionStatusPending, 2, cursor)
+			page, nextCursor = p, nc
+			return err
+		}); err != nil {
+			t.Fatalf("View: %v", err)
+		}
+		if len(page) > 2 {
+			t.Fatalf("page size: got %d, want <= 2", len(page))
+		}
+		for _, ex := range page {
+			got = append(got, ex.ID)
+		}
+		if nextCursor == "" {
+			break
+		}
+		cursor = nextCursor
+	}
+
+	if !slices.Equal(got, want) {
+		t.Fatalf("ids mismatch:\ngot:  %+v\nwant: %+v", got, want)
+	}
+}
+
+// TestStorage_ListExecutionsByStatusPage_CursorSurvivesStatusChange proves
+// the "opaque cursor, graceful Seek" design: if the item a cursor points to
+// has since moved out of this status's index (a status change deletes and
+// re-adds the index entry, per PutExecution), the next page still resumes
+// correctly instead of erroring or silently skipping unrelated entries.
+func TestStorage_ListExecutionsByStatusPage_CursorSurvivesStatusChange(t *testing.T) {
+	s := newTestStorage(t)
+	p0 := newTestExecution(func(e *model.Execution) { e.ID = "exec_p_00"; e.Status = model.ExecutionStatusPending })
+	p1 := newTestExecution(func(e *model.Execution) { e.ID = "exec_p_01"; e.Status = model.ExecutionStatusPending })
+	p2 := newTestExecution(func(e *model.Execution) { e.ID = "exec_p_02"; e.Status = model.ExecutionStatusPending })
+	if err := s.Update(func(tx Tx) error {
+		for _, ex := range []*model.Execution{p0, p1, p2} {
+			if err := tx.PutExecution(ex); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed Update: %v", err)
+	}
+
+	var firstPage []*model.Execution
+	var cursor string
+	if err := s.View(func(tx Tx) error {
+		p, nc, err := tx.ListExecutionsByStatusPage(testTenantID, model.ExecutionStatusPending, 1, "")
+		firstPage, cursor = p, nc
+		return err
+	}); err != nil {
+		t.Fatalf("View page 1: %v", err)
+	}
+	if len(firstPage) != 1 || firstPage[0].ID != "exec_p_00" || cursor != "exec_p_00" {
+		t.Fatalf("page 1: got %+v, cursor %q", firstPage, cursor)
+	}
+
+	// p1 (the very next item after the cursor) moves out of "pending" --
+	// its old index entry is deleted by this Put.
+	p1.Status = model.ExecutionStatusSucceeded
+	if err := s.Update(func(tx Tx) error { return tx.PutExecution(p1) }); err != nil {
+		t.Fatalf("Update p1 status: %v", err)
+	}
+
+	var secondPage []*model.Execution
+	var secondCursor string
+	if err := s.View(func(tx Tx) error {
+		p, nc, err := tx.ListExecutionsByStatusPage(testTenantID, model.ExecutionStatusPending, 10, cursor)
+		secondPage, secondCursor = p, nc
+		return err
+	}); err != nil {
+		t.Fatalf("View page 2: %v", err)
+	}
+	if secondCursor != "" {
+		t.Errorf("second page nextCursor: got %q, want empty", secondCursor)
+	}
+	if len(secondPage) != 1 || secondPage[0].ID != "exec_p_02" {
+		t.Fatalf("second page: got %+v, want just exec_p_02", secondPage)
+	}
+}
+
+func TestStorage_ListExecutionsByStatusPage_NoMatchReturnsEmpty(t *testing.T) {
+	s := newTestStorage(t)
+	var page []*model.Execution
+	var nextCursor string
+	if err := s.View(func(tx Tx) error {
+		p, nc, err := tx.ListExecutionsByStatusPage(testTenantID, model.ExecutionStatusPending, 50, "")
+		page, nextCursor = p, nc
+		return err
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	if len(page) != 0 || nextCursor != "" {
+		t.Fatalf("got page=%+v nextCursor=%q, want empty", page, nextCursor)
+	}
+}
+
+func TestStorage_ListTenantsPage_WalksAllPages(t *testing.T) {
+	s := newTestStorage(t)
+	want := []string{"tenant_00", "tenant_01", "tenant_02", "tenant_03", "tenant_04"}
+	if err := s.Update(func(tx Tx) error {
+		for _, id := range want {
+			if err := tx.PutTenant(&model.Tenant{ID: id, Name: fmt.Sprintf("Tenant %s", id)}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	var got []string
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > 10 {
+			t.Fatal("pagination did not terminate")
+		}
+		var page []*model.Tenant
+		var nextCursor string
+		if err := s.View(func(tx Tx) error {
+			p, nc, err := tx.ListTenantsPage(2, cursor)
+			page, nextCursor = p, nc
+			return err
+		}); err != nil {
+			t.Fatalf("View: %v", err)
+		}
+		if len(page) > 2 {
+			t.Fatalf("page size: got %d, want <= 2", len(page))
+		}
+		for _, tenant := range page {
+			got = append(got, tenant.ID)
+		}
+		if nextCursor == "" {
+			break
+		}
+		cursor = nextCursor
+	}
+
+	if !slices.Equal(got, want) {
+		t.Fatalf("ids mismatch:\ngot:  %+v\nwant: %+v", got, want)
+	}
+}
+
+func TestStorage_ListExecutionsBySchedulePage_HappyPath(t *testing.T) {
+	s := newTestStorage(t)
+	schedule := newTestSchedule(func(e *model.Schedule) { e.ID = sched1a })
+	want := []string{"exec_1a", "exec_1b", "exec_1c"}
+	if err := s.Update(func(tx Tx) error {
+		for _, id := range want {
+			ex := newTestExecution(func(e *model.Execution) { e.ID = id; e.ScheduleID = schedule.ID })
+			if err := tx.PutExecution(ex); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	var page []*model.Execution
+	var nextCursor string
+	if err := s.View(func(tx Tx) error {
+		p, nc, err := tx.ListExecutionsBySchedulePage(schedule.TenantID, schedule.ID, 50, "")
+		page, nextCursor = p, nc
+		return err
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	var got []string
+	for _, ex := range page {
+		got = append(got, ex.ID)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ids mismatch:\ngot:  %+v\nwant: %+v", got, want)
+	}
+	if nextCursor != "" {
+		t.Errorf("nextCursor: got %q, want empty", nextCursor)
+	}
+}
+
+func TestStorage_ListAttemptsByExecutionPage_HappyPath(t *testing.T) {
+	s := newTestStorage(t)
+	execution := newTestExecution(func(e *model.Execution) { e.ID = exec1a })
+	want := []string{"atte_1a", "atte_1b", "atte_1c"}
+	if err := s.Update(func(tx Tx) error {
+		for _, id := range want {
+			at := newTestAttempt(func(a *model.Attempt) { a.ID = id; a.ExecutionID = execution.ID })
+			if err := tx.PutAttempt(at); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	var page []*model.Attempt
+	var nextCursor string
+	if err := s.View(func(tx Tx) error {
+		p, nc, err := tx.ListAttemptsByExecutionPage(testTenantID, execution.ID, 2, "")
+		page, nextCursor = p, nc
+		return err
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	var got []string
+	for _, at := range page {
+		got = append(got, at.ID)
+	}
+	if !slices.Equal(got, []string{"atte_1a", "atte_1b"}) {
+		t.Fatalf("first page ids mismatch: got %+v", got)
+	}
+	if nextCursor != "atte_1b" {
+		t.Fatalf("nextCursor: got %q, want %q", nextCursor, "atte_1b")
 	}
 }
