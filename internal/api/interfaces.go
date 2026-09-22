@@ -13,14 +13,14 @@ import (
 type Reader interface {
 	IsLeader() bool
 	LeaderAddr() string
-	ListTenants() ([]*model.Tenant, error)
 	GetTenant(tenantID string) (*model.Tenant, error)
 	GetSchedule(tenantID, id string) (*model.Schedule, error)
 	GetExecution(tenantID, id string) (*model.Execution, error)
 	GetAttempt(tenantID, id string) (*model.Attempt, error)
-	ListExecutionsBySchedule(tenantID, scheduleID string) ([]*model.Execution, error)
-	ListExecutionsByStatus(tenantID string, status model.ExecutionStatus) ([]*model.Execution, error)
-	ListAttemptsByExecution(tenantID, executionID string) ([]*model.Attempt, error)
+	ListTenantsPage(limit int, cursor string) (tenants []*model.Tenant, nextCursor string, err error)
+	ListExecutionsBySchedulePage(tenantID, scheduleID string, limit int, cursor string) (executions []*model.Execution, nextCursor string, err error)
+	ListExecutionsByStatusPage(tenantID string, status model.ExecutionStatus, limit int, cursor string) (executions []*model.Execution, nextCursor string, err error)
+	ListAttemptsByExecutionPage(tenantID, executionID string, limit int, cursor string) (attempts []*model.Attempt, nextCursor string, err error)
 }
 
 type Proposer interface {

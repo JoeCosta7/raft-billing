@@ -278,12 +278,17 @@ func (a *API) handleListTenants(w http.ResponseWriter, r *http.Request) {
 	if !a.requireAdmin(w, r) {
 		return
 	}
-	tenants, err := a.backend.ListTenants()
+	limit, cursor, err := parsePagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	tenants, nextCursor, err := a.backend.ListTenantsPage(limit, cursor)
 	if err != nil {
 		writeReadError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, sanitizeTenants(tenants))
+	writeJSON(w, http.StatusOK, pageResponse[*model.Tenant]{Items: sanitizeTenants(tenants), NextCursor: nextCursor})
 }
 
 func (a *API) handleGetTenant(w http.ResponseWriter, r *http.Request) {
@@ -334,12 +339,17 @@ func (a *API) handleListExecutionsBySchedule(w http.ResponseWriter, r *http.Requ
 	if !a.requireTenantAccess(w, r, tenantID) {
 		return
 	}
-	executions, err := a.backend.ListExecutionsBySchedule(tenantID, r.PathValue("scheduleID"))
+	limit, cursor, err := parsePagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	executions, nextCursor, err := a.backend.ListExecutionsBySchedulePage(tenantID, r.PathValue("scheduleID"), limit, cursor)
 	if err != nil {
 		writeReadError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, executions)
+	writeJSON(w, http.StatusOK, pageResponse[*model.Execution]{Items: executions, NextCursor: nextCursor})
 }
 
 func (a *API) handleListExecutionsByStatus(w http.ResponseWriter, r *http.Request) {
@@ -355,12 +365,17 @@ func (a *API) handleListExecutionsByStatus(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "status query parameter is required")
 		return
 	}
-	executions, err := a.backend.ListExecutionsByStatus(tenantID, model.ExecutionStatus(status))
+	limit, cursor, err := parsePagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	executions, nextCursor, err := a.backend.ListExecutionsByStatusPage(tenantID, model.ExecutionStatus(status), limit, cursor)
 	if err != nil {
 		writeReadError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, executions)
+	writeJSON(w, http.StatusOK, pageResponse[*model.Execution]{Items: executions, NextCursor: nextCursor})
 }
 
 func (a *API) handleGetExecution(w http.ResponseWriter, r *http.Request) {
@@ -391,12 +406,17 @@ func (a *API) handleListAttemptsByExecution(w http.ResponseWriter, r *http.Reque
 	if !a.requireTenantAccess(w, r, tenantID) {
 		return
 	}
-	attempts, err := a.backend.ListAttemptsByExecution(tenantID, r.PathValue("executionID"))
+	limit, cursor, err := parsePagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	attempts, nextCursor, err := a.backend.ListAttemptsByExecutionPage(tenantID, r.PathValue("executionID"), limit, cursor)
 	if err != nil {
 		writeReadError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, attempts)
+	writeJSON(w, http.StatusOK, pageResponse[*model.Attempt]{Items: attempts, NextCursor: nextCursor})
 }
 
 func (a *API) handleGetAttempt(w http.ResponseWriter, r *http.Request) {

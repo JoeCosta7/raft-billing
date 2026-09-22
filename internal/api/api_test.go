@@ -3,12 +3,14 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"raft-biling/internal/command"
 	"raft-biling/internal/config"
 	"raft-biling/internal/model"
+	"sort"
 	"testing"
 	"time"
 )
@@ -54,13 +56,6 @@ func (f *fakeBackend) Propose(cmdType string, cmd any, timeout time.Duration) (a
 	return f.proposeFn(cmdType, cmd, timeout)
 }
 
-func (f *fakeBackend) ListTenants() ([]*model.Tenant, error) {
-	var out []*model.Tenant
-	for _, t := range f.tenants {
-		out = append(out, t)
-	}
-	return out, nil
-}
 func (f *fakeBackend) GetTenant(tenantID string) (*model.Tenant, error) {
 	return f.tenants[tenantID], nil
 }
@@ -73,26 +68,58 @@ func (f *fakeBackend) GetExecution(tenantID, id string) (*model.Execution, error
 func (f *fakeBackend) GetAttempt(tenantID, id string) (*model.Attempt, error) {
 	return f.attempts[tenantID+":"+id], nil
 }
-func (f *fakeBackend) ListExecutionsBySchedule(tenantID, scheduleID string) ([]*model.Execution, error) {
+
+func paginate[T any](items []T, limit int, cursor string, idOf func(T) string) ([]T, string) {
+	sort.Slice(items, func(i, j int) bool { return idOf(items[i]) < idOf(items[j]) })
+	if limit <= 0 {
+		return nil, ""
+	}
+	start := 0
+	if cursor != "" {
+		start = sort.Search(len(items), func(i int) bool { return idOf(items[i]) > cursor })
+	}
+	if start >= len(items) {
+		return nil, ""
+	}
+	end := start + limit
+	if end >= len(items) {
+		return items[start:], ""
+	}
+	return items[start:end], idOf(items[end-1])
+}
+
+func (f *fakeBackend) ListTenantsPage(limit int, cursor string) ([]*model.Tenant, string, error) {
+	var out []*model.Tenant
+	for _, t := range f.tenants {
+		out = append(out, t)
+	}
+	page, nextCursor := paginate(out, limit, cursor, func(t *model.Tenant) string { return t.ID })
+	return page, nextCursor, nil
+}
+func (f *fakeBackend) ListExecutionsBySchedulePage(tenantID, scheduleID string, limit int, cursor string) ([]*model.Execution, string, error) {
 	var out []*model.Execution
 	for _, e := range f.executions {
 		if e.TenantID == tenantID && e.ScheduleID == scheduleID {
 			out = append(out, e)
 		}
 	}
-	return out, nil
+	page, nextCursor := paginate(out, limit, cursor, func(e *model.Execution) string { return e.ID })
+	return page, nextCursor, nil
 }
-func (f *fakeBackend) ListExecutionsByStatus(tenantID string, status model.ExecutionStatus) ([]*model.Execution, error) {
+func (f *fakeBackend) ListExecutionsByStatusPage(tenantID string, status model.ExecutionStatus, limit int, cursor string) ([]*model.Execution, string, error) {
 	var out []*model.Execution
 	for _, e := range f.executions {
 		if e.TenantID == tenantID && e.Status == status {
 			out = append(out, e)
 		}
 	}
-	return out, nil
+	page, nextCursor := paginate(out, limit, cursor, func(e *model.Execution) string { return e.ID })
+	return page, nextCursor, nil
 }
-func (f *fakeBackend) ListAttemptsByExecution(tenantID, executionID string) ([]*model.Attempt, error) {
-	return f.executionsByExec[tenantID+":"+executionID], nil
+func (f *fakeBackend) ListAttemptsByExecutionPage(tenantID, executionID string, limit int, cursor string) ([]*model.Attempt, string, error) {
+	out := f.executionsByExec[tenantID+":"+executionID]
+	page, nextCursor := paginate(out, limit, cursor, func(a *model.Attempt) string { return a.ID })
+	return page, nextCursor, nil
 }
 
 func newTestAPI(backend *fakeBackend) *API {
@@ -330,6 +357,41 @@ func TestHandleCreateSchedule_AdminKeyWorksForAnyTenant(t *testing.T) {
 	}
 }
 
+func TestHandleListTenants_HappyPath(t *testing.T) {
+	backend := newFakeBackend()
+	backend.tenants["t1"] = &model.Tenant{ID: "t1", Name: "Acme", APIKeyHash: "should-not-leak"}
+	backend.tenants["t2"] = &model.Tenant{ID: "t2", Name: "Globex", APIKeyHash: "should-not-leak"}
+	a := newTestAPI(backend)
+
+	rec := doRequest(t, a, http.MethodGet, "/tenants", nil, testAdminKey)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got pageResponse[*model.Tenant]
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Items) != 2 {
+		t.Fatalf("tenants: got %d, want 2", len(got.Items))
+	}
+	for _, tenant := range got.Items {
+		if tenant.APIKeyHash != "" {
+			t.Error("response leaked APIKeyHash — sanitizeTenants should have cleared it")
+		}
+	}
+}
+
+func TestHandleListTenants_TenantKeyRejected401(t *testing.T) {
+	backend := newFakeBackend()
+	backend.seedTenant("t1")
+	a := newTestAPI(backend)
+
+	rec := doRequest(t, a, http.MethodGet, "/tenants", nil, testTenantKey)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestHandleGetTenant_NotFound(t *testing.T) {
 	backend := newFakeBackend()
 	a := newTestAPI(backend)
@@ -409,12 +471,74 @@ func TestHandleListExecutionsByStatus_HappyPath(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	var got []*model.Execution
+	var got pageResponse[*model.Execution]
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(got) != 1 || got[0].ID != "e1" {
-		t.Errorf("executions: got %+v, want just e1", got)
+	if len(got.Items) != 1 || got.Items[0].ID != "e1" {
+		t.Errorf("executions: got %+v, want just e1", got.Items)
+	}
+	if got.NextCursor != "" {
+		t.Errorf("next_cursor: got %q, want empty (only one matching item)", got.NextCursor)
+	}
+}
+
+func TestHandleListExecutionsByStatus_LimitValidation(t *testing.T) {
+	backend := newFakeBackend()
+	backend.seedTenant("t1")
+	a := newTestAPI(backend)
+
+	for _, limit := range []string{"0", "-1", "not-a-number", "201"} {
+		rec := doRequest(t, a, http.MethodGet, "/tenants/t1/executions?status=in_flight&limit="+limit, nil, testTenantKey)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("limit=%s: status: got %d, want %d", limit, rec.Code, http.StatusBadRequest)
+		}
+	}
+}
+
+func TestHandleListExecutionsByStatus_PaginatesWithCursor(t *testing.T) {
+	backend := newFakeBackend()
+	backend.seedTenant("t1")
+	for i := range 5 {
+		id := fmt.Sprintf("e%d", i)
+		backend.executions["t1:"+id] = &model.Execution{ID: id, TenantID: "t1", Status: model.ExecutionStatusInFlight}
+	}
+	a := newTestAPI(backend)
+
+	var allIDs []string
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > 10 {
+			t.Fatal("pagination did not terminate")
+		}
+		rec := doRequest(t, a, http.MethodGet, "/tenants/t1/executions?status=in_flight&limit=2&cursor="+cursor, nil, testTenantKey)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var got pageResponse[*model.Execution]
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(got.Items) > 2 {
+			t.Fatalf("page size: got %d, want <= 2", len(got.Items))
+		}
+		for _, e := range got.Items {
+			allIDs = append(allIDs, e.ID)
+		}
+		if got.NextCursor == "" {
+			break
+		}
+		cursor = got.NextCursor
+	}
+
+	want := []string{"e0", "e1", "e2", "e3", "e4"}
+	if len(allIDs) != len(want) {
+		t.Fatalf("collected IDs: got %v, want %v", allIDs, want)
+	}
+	for i, id := range want {
+		if allIDs[i] != id {
+			t.Errorf("position %d: got %q, want %q", i, allIDs[i], id)
+		}
 	}
 }
 
