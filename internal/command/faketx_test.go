@@ -160,11 +160,6 @@ func (f *fakeTx) ListSchedulesDue(tenantID string, now time.Time, fn func(*model
 	return nil
 }
 
-// paginate slices a sorted-by-ID slice starting just past cursor (the last
-// ID returned by the previous page), up to limit items, reporting the last
-// item's ID as nextCursor when more remain. Shared by the four Page methods
-// below -- this fake is map-backed, not bbolt, so it has no cursor/Seek to
-// reuse like the real storage.Tx implementation does.
 func paginate[T any](items []T, limit int, cursor string, idOf func(T) string) ([]T, string) {
 	if limit <= 0 {
 		return nil, ""

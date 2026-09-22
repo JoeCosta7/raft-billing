@@ -138,11 +138,6 @@ func TestRaftNode_NeverBootstrapped_NonLeaderReadsAllError(t *testing.T) {
 	}
 }
 
-// TestRaftNode_ListTenantsPage_ThreadsLimitAndCursor is a smoke test for the
-// paginated wrapper -- the real cursor-walk logic is covered exhaustively at
-// the storage layer, this just confirms RaftNode threads limit/cursor/
-// nextCursor through storage.View correctly and still enforces the leader
-// gate the unpaginated methods use.
 func TestRaftNode_ListTenantsPage_ThreadsLimitAndCursor(t *testing.T) {
 	rn := newTestRaftNode(t, true)
 	waitForLeader(t, rn)

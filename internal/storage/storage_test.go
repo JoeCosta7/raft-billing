@@ -521,11 +521,6 @@ func TestStorage_ListExecutionsByStatusPage_WalksAllPages(t *testing.T) {
 	}
 }
 
-// TestStorage_ListExecutionsByStatusPage_CursorSurvivesStatusChange proves
-// the "opaque cursor, graceful Seek" design: if the item a cursor points to
-// has since moved out of this status's index (a status change deletes and
-// re-adds the index entry, per PutExecution), the next page still resumes
-// correctly instead of erroring or silently skipping unrelated entries.
 func TestStorage_ListExecutionsByStatusPage_CursorSurvivesStatusChange(t *testing.T) {
 	s := newTestStorage(t)
 	p0 := newTestExecution(func(e *model.Execution) { e.ID = "exec_p_00"; e.Status = model.ExecutionStatusPending })
