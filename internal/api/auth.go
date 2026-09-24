@@ -66,7 +66,7 @@ func (a *API) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 		writeError(w, http.StatusUnauthorized, "missing or invalid admin credentials")
 		return false
 	}
-	return true
+	return a.allowRate(w, "admin")
 }
 
 // requireTenantAccess answers 401 and returns false unless the request
@@ -81,7 +81,7 @@ func (a *API) requireTenantAccess(w http.ResponseWriter, r *http.Request, tenant
 		return false
 	}
 	if constantTimeEqual(token, a.cfg.AdminKey) {
-		return true
+		return a.allowRate(w, "admin")
 	}
 	tenant, err := a.backend.GetTenant(tenantID)
 	if err != nil {
@@ -92,5 +92,5 @@ func (a *API) requireTenantAccess(w http.ResponseWriter, r *http.Request, tenant
 		writeError(w, http.StatusUnauthorized, "missing or invalid credentials")
 		return false
 	}
-	return true
+	return a.allowRate(w, tenantID)
 }

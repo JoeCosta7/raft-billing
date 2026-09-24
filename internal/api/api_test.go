@@ -123,7 +123,12 @@ func (f *fakeBackend) ListAttemptsByExecutionPage(tenantID, executionID string, 
 }
 
 func newTestAPI(backend *fakeBackend) *API {
-	return &API{backend: backend, cfg: &config.Config{AdminKey: testAdminKey}, logger: slog.New(slog.DiscardHandler)}
+	return &API{
+		backend: backend,
+		cfg:     &config.Config{AdminKey: testAdminKey},
+		logger:  slog.New(slog.DiscardHandler),
+		limiter: newRateLimiter(defaultRatePerSecond, defaultBurst),
+	}
 }
 
 func doRequest(t *testing.T, a *API, method, path string, body any, token string) *httptest.ResponseRecorder {
@@ -588,3 +593,88 @@ var errServiceDown = &testError{"service down"}
 type testError struct{ msg string }
 
 func (e *testError) Error() string { return e.msg }
+
+func TestRequireAdmin_RateLimitExceeded429(t *testing.T) {
+	backend := newFakeBackend()
+	backend.proposeFn = func(cmdType string, cmd any, timeout time.Duration) (any, error) {
+		tc := cmd.(command.CreateTenantCommand)
+		tenant := &model.Tenant{ID: tc.ID}
+		backend.tenants[tc.ID] = tenant
+		return tenant, nil
+	}
+	a := newTestAPI(backend)
+	a.limiter = newRateLimiter(1, 1)
+
+	first := doRequest(t, a, http.MethodPost, "/tenants", command.CreateTenantCommand{ID: "t1"}, testAdminKey)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first request: status: got %d, want %d, body: %s", first.Code, http.StatusCreated, first.Body.String())
+	}
+
+	second := doRequest(t, a, http.MethodPost, "/tenants", command.CreateTenantCommand{ID: "t2"}, testAdminKey)
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request: status: got %d, want %d, body: %s", second.Code, http.StatusTooManyRequests, second.Body.String())
+	}
+	if second.Header().Get("Retry-After") == "" {
+		t.Error("expected a Retry-After header on the 429 response")
+	}
+}
+
+func TestRequireTenantAccess_RateLimitExceeded429(t *testing.T) {
+	backend := newFakeBackend()
+	backend.seedTenant("t1")
+	a := newTestAPI(backend)
+	a.limiter = newRateLimiter(1, 1)
+
+	first := doRequest(t, a, http.MethodGet, "/tenants/t1", nil, testTenantKey)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first request: status: got %d, want %d", first.Code, http.StatusOK)
+	}
+
+	second := doRequest(t, a, http.MethodGet, "/tenants/t1", nil, testTenantKey)
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request: status: got %d, want %d, body: %s", second.Code, http.StatusTooManyRequests, second.Body.String())
+	}
+}
+
+func TestRequireTenantAccess_RateLimitsAreIndependentPerTenant(t *testing.T) {
+	backend := newFakeBackend()
+	backend.seedTenant("t1")
+	backend.tenants["t2"] = &model.Tenant{ID: "t2", APIKeyHash: hashAPIKey("t2-key")}
+	a := newTestAPI(backend)
+	a.limiter = newRateLimiter(1, 1)
+
+	// Exhaust t1's budget.
+	doRequest(t, a, http.MethodGet, "/tenants/t1", nil, testTenantKey)
+	exhausted := doRequest(t, a, http.MethodGet, "/tenants/t1", nil, testTenantKey)
+	if exhausted.Code != http.StatusTooManyRequests {
+		t.Fatalf("t1 second request: status: got %d, want %d", exhausted.Code, http.StatusTooManyRequests)
+	}
+
+	// t2 has never made a request, so its independent budget is untouched.
+	stillOK := doRequest(t, a, http.MethodGet, "/tenants/t2", nil, "t2-key")
+	if stillOK.Code != http.StatusOK {
+		t.Fatalf("t2 first request: status: got %d, want %d, body: %s", stillOK.Code, http.StatusOK, stillOK.Body.String())
+	}
+}
+
+// TestRequireTenantAccess_AdminSharesAdminBucketAcrossTenants proves the
+// rate-limit identity is the credential ("admin"), not the resource path --
+// an admin key spending its budget against one tenant's path leaves it
+// exhausted against a completely different tenant's path too.
+func TestRequireTenantAccess_AdminSharesAdminBucketAcrossTenants(t *testing.T) {
+	backend := newFakeBackend()
+	backend.tenants["t1"] = &model.Tenant{ID: "t1"}
+	backend.tenants["t2"] = &model.Tenant{ID: "t2"}
+	a := newTestAPI(backend)
+	a.limiter = newRateLimiter(1, 1)
+
+	first := doRequest(t, a, http.MethodGet, "/tenants/t1", nil, testAdminKey)
+	if first.Code != http.StatusOK {
+		t.Fatalf("admin request against t1: status: got %d, want %d", first.Code, http.StatusOK)
+	}
+
+	second := doRequest(t, a, http.MethodGet, "/tenants/t2", nil, testAdminKey)
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("admin request against t2: status: got %d, want %d (admin bucket should already be exhausted)", second.Code, http.StatusTooManyRequests)
+	}
+}
