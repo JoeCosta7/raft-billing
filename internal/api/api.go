@@ -24,10 +24,11 @@ type API struct {
 	backend Backend
 	logger  *slog.Logger
 	server  *http.Server
+	limiter *rateLimiter
 }
 
 func New(cfg *config.Config, rn *raftnode.RaftNode, sm *statemachine.StateMachine) *API {
-	a := &API{cfg: cfg, backend: rn, logger: slog.Default()}
+	a := &API{cfg: cfg, backend: rn, logger: slog.Default(), limiter: newRateLimiter(defaultRatePerSecond, defaultBurst)}
 	a.server = &http.Server{Handler: a.routes()}
 	return a
 }
