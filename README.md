@@ -77,7 +77,23 @@ There's no built-in TLS termination — this assumes the service runs behind a T
 | `GET` | `/tenants/{tenantID}/executions/{executionID}/attempts` | List attempts for an execution |
 | `GET` | `/tenants/{tenantID}/attempts/{attemptID}` | Get an attempt |
 
-Error responses are `{"error": "..."}` with a status mapped from the rejection kind: `400` validation, `401` missing/invalid credentials, `404` not found, `409` conflict, `503` not leader / unreachable, `500` storage.
+Error responses are `{"error": "..."}` with a status mapped from the rejection kind: `400` validation, `401` missing/invalid credentials, `404` not found, `409` conflict, `429` rate limited, `503` not leader / unreachable, `500` storage.
+
+### Pagination
+
+The four list endpoints (`GET /tenants`, the two execution-list endpoints, and the attempts list) take `?limit=` (default 50, max 200) and `?cursor=` query params and respond with an envelope instead of a bare array:
+
+```json
+{"items": [...], "next_cursor": "01J..."}
+```
+
+`next_cursor` is omitted once there's no next page. Treat it as opaque — always pass back exactly what the previous response gave you, don't construct one yourself. `limit` outside `1..200`, or non-integer, is a `400`.
+
+### Rate limiting
+
+Every request draws from a token bucket (20 req/s, burst 40) keyed by whichever credential authenticated it: each tenant's own API key gets its own independent budget, while the admin key shares one budget across every endpoint it touches, regardless of which tenant's path it's used on. Exceeding it gets a `429` with a `Retry-After` header.
+
+This budget is in-memory on whichever node is currently leader, not replicated through Raft — a leadership failover resets it. That's a deliberate tradeoff: rate-limit counters have no business going through consensus, and since only the leader ever serves API requests anyway, there's nothing to coordinate across nodes in the first place.
 
 ### Example: create a recurring schedule
 
